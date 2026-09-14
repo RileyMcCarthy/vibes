@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # The tool itself. Its own tests are the only thing standing between a silent
+  # misreport and a reviewer believing it, so they gate everything else.
+  tool:
+    name: tool
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version: '20' }
+      - run: npm ci --no-audit --no-fund
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Test
+        run: npm test
+      - name: Build
+        run: npm run build
+
+  # The bindings ship to three languages and none of them is exercised by the
+  # tool's own tests. Compiling each against a throwaway test proves the macros
+  # still expand and the crate still builds.
+  bindings:
+    name: bindings (${{ matrix.lang }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lang: [c, rust, ts]
+    steps:
+      - uses: actions/checkout@v7
+
+      - if: matrix.lang == 'c'
+        name: Compile the C binding and emit a record
+        run: |
+          cat > /tmp/probe.c <<'PROBE'
+          #include <assert.h>
+          #include <stdio.h>
+          #include <string.h>
+          #include "vibes_behaviour.h"
+          int main(void) {
+              VIBES_TEST("probe.header-compiles",
+                         "bindings/c/vibes_behaviour.h",
+                         "the header included in a translation unit of its own");
+              VIBES_EXPECT("emits", "one line is appended for each expectation");
+              VIBES_EXPECT_WHY("why-form", "the reason form also compiles",
+                               "both macros are shipped and both must expand");
+              return 0;
+          }
+          PROBE
+          gcc -Wall -Wextra -Werror -Ibindings/c -o /tmp/probe /tmp/probe.c
+          VIBES_BEHAVIOURS=/tmp/out.jsonl /tmp/probe
+          test "$(wc -l < /tmp/out.jsonl)" = "2"
+          grep -q '"v":2' /tmp/out.jsonl
+          grep -q '"expect":"emits"' /tmp/out.jsonl
+          echo "C binding emits v2 records"
+
+      - if: matrix.lang == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+      - if: matrix.lang == 'rust'
+        name: Build and lint the Rust binding
+        working-directory: bindings/rust
+        run: |
+          cargo build --all-targets
+          cargo clippy --all-targets -- -D warnings
+
+      - if: matrix.lang == 'ts'
+        uses: actions/setup-node@v7
+        with: { node-version: '20' }
+      - if: matrix.lang == 'ts'
+        name: Typecheck the TypeScript binding
+        run: |
+          npm ci --no-audit --no-fund
+          npx tsc --noEmit --strict --module esnext --moduleResolution bundler \
+            --skipLibCheck bindings/ts/index.ts
