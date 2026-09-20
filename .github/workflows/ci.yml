@@ -23,6 +23,22 @@ jobs:
       - name: Build
         run: npm run build
 
+      # A consumer installs this from git, so npm builds it via `prepare` and
+      # then packs the result. With no `files` field npm falls back to
+      # .gitignore when packing -- and dist/ is gitignored -- so it would build
+      # the output and then silently leave it out of the very package it just
+      # built. This asserts the tarball actually carries what the bin imports.
+      - name: Pack carries the built output
+        run: |
+          npm pack --dry-run --json | node -e '
+            const files = JSON.parse(require("fs").readFileSync(0, "utf8"))[0].files.map((f) => f.path);
+            const need = ["dist/cli.js", "bin/vibes.mjs", "bindings/ts/index.ts", "bindings/c/vibes_behaviour.h", "bindings/rust/src/lib.rs"];
+            const missing = need.filter((n) => !files.includes(n));
+            if (missing.length) { console.error("tarball is missing:", missing.join(", ")); process.exit(1); }
+            if (files.some((f) => f.startsWith("src/"))) { console.error("tarball ships src/"); process.exit(1); }
+            console.log(`tarball ok: ${files.length} files`);
+          '
+
   # The bindings ship to three languages and none of them is exercised by the
   # tool's own tests. Compiling each against a throwaway test proves the macros
   # still expand and the crate still builds.
