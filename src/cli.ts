@@ -15,7 +15,7 @@ import { collect } from './collect.js';
 import { diffLedgers, hasRegression } from './diff.js';
 import { assignNumbers, parseLedger, serializeLedger, type Behaviour } from './ledger.js';
 import { renderMarkdown } from './report.js';
-import { countBySeverity, lintLedger, type LintOptions } from './lint.js';
+import { countBySeverity, lintLedger, type Allowance, type LintOptions } from './lint.js';
 import { formatFindings, lintInline, previewInline, previewLedger, type PreviewFilter } from './preview.js';
 
 export const LEDGER = 'behaviours.jsonl';
@@ -87,20 +87,31 @@ function flags(argv: readonly string[], name: string): string[] {
 }
 
 function lintOptions(root: string, argv: readonly string[]): LintOptions {
-  const words: string[] = [];
+  const allow: Allowance[] = [];
   const p = join(root, LINT_CONFIG);
   if (existsSync(p)) {
     try {
       const cfg = JSON.parse(readFileSync(p, 'utf8')) as { allow?: unknown };
-      if (Array.isArray(cfg.allow)) words.push(...cfg.allow.filter((w): w is string => typeof w === 'string'));
+      for (const entry of Array.isArray(cfg.allow) ? cfg.allow : []) {
+        if (typeof entry === 'string') {
+          allow.push(entry);
+          continue;
+        }
+        // A scoped entry, which is the shape that keeps an allowance honest.
+        // Anything else in the object (a note saying why) is ignored.
+        const e = entry as { words?: unknown; in?: unknown };
+        if (!Array.isArray(e.words)) continue;
+        const wordList = e.words.filter((w): w is string => typeof w === 'string');
+        allow.push(typeof e.in === 'string' ? { words: wordList, in: e.in } : { words: wordList });
+      }
     } catch {
       // A malformed config must not stop a lint from running; it only ever
       // widens what is allowed, so the strict reading is the safe fallback.
     }
   }
   const inline = flag(argv, 'allow');
-  if (inline !== undefined && inline !== '') words.push(...inline.split(',').map((w) => w.trim()));
-  return { allow: words };
+  if (inline !== undefined && inline !== '') allow.push(...inline.split(',').map((w) => w.trim()));
+  return { allow };
 }
 
 export async function main(argv: readonly string[]): Promise<number> {
