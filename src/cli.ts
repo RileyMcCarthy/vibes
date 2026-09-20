@@ -4,6 +4,8 @@
  *   vibes collect            run every suite, print the ledger
  *   vibes collect --write    ... and update the committed ledger
  *   vibes report --base REF  diff the ledger against REF and render
+ *   vibes preview            render a claim as its reader will meet it
+ *   vibes lint               the decidable half of CLAIMS.md
  */
 
 import { execFileSync } from 'node:child_process';
@@ -13,14 +15,19 @@ import { collect } from './collect.js';
 import { diffLedgers, hasRegression } from './diff.js';
 import { assignNumbers, parseLedger, serializeLedger, type Behaviour } from './ledger.js';
 import { renderMarkdown } from './report.js';
+import { countBySeverity, lintLedger, type LintOptions } from './lint.js';
+import { formatFindings, lintInline, previewInline, previewLedger, type PreviewFilter } from './preview.js';
 
 export const LEDGER = 'behaviours.jsonl';
+/** Optional, repo-root: `{ "allow": ["flush"] }` — words this repo's operators
+ *  genuinely use, which the default vocabulary would otherwise flag. */
+export const LINT_CONFIG = 'vibes.lint.json';
 /** High-water mark for behaviour numbers. Separate from the ledger because it
  *  must remember numbers whose behaviours have been deleted — that is the whole
  *  point of it. On a merge conflict, keep the larger number. */
 export const COUNTER = 'behaviours.next';
 
-const EXIT = { OK: 0, REGRESSION: 1, USAGE: 2, COLLECT: 3 } as const;
+const EXIT = { OK: 0, REGRESSION: 1, USAGE: 2, COLLECT: 3, LINT: 4 } as const;
 
 /** Expectations listed under "New behaviour" in the PR comment. Enough to read
  *  a normal change whole; a bulk import says how much it held back. */
@@ -68,6 +75,34 @@ function flag(argv: readonly string[], name: string): string | undefined {
   return v === undefined || v.startsWith('--') ? '' : v;
 }
 
+/** Every occurrence — a test has several expectations, so `--then` repeats. */
+function flags(argv: readonly string[], name: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] !== `--${name}`) continue;
+    const v = argv[i + 1];
+    if (v !== undefined && !v.startsWith('--')) out.push(v);
+  }
+  return out;
+}
+
+function lintOptions(root: string, argv: readonly string[]): LintOptions {
+  const words: string[] = [];
+  const p = join(root, LINT_CONFIG);
+  if (existsSync(p)) {
+    try {
+      const cfg = JSON.parse(readFileSync(p, 'utf8')) as { allow?: unknown };
+      if (Array.isArray(cfg.allow)) words.push(...cfg.allow.filter((w): w is string => typeof w === 'string'));
+    } catch {
+      // A malformed config must not stop a lint from running; it only ever
+      // widens what is allowed, so the strict reading is the safe fallback.
+    }
+  }
+  const inline = flag(argv, 'allow');
+  if (inline !== undefined && inline !== '') words.push(...inline.split(',').map((w) => w.trim()));
+  return { allow: words };
+}
+
 export async function main(argv: readonly string[]): Promise<number> {
   const cmd = argv[0] ?? 'report';
   const root = repoRoot();
@@ -77,8 +112,16 @@ export async function main(argv: readonly string[]): Promise<number> {
     process.stdout.write(
       'vibes — what behaviour does this change add, and what stopped holding?\n\n' +
         '  vibes collect [--write]     run every suite; --write updates ' + LEDGER + '\n' +
-        '  vibes report --base REF     diff against REF and render markdown\n\n' +
-        'Exit: 0 ok · 1 a behaviour broke or was removed · 2 usage · 3 a suite could not run\n',
+        '  vibes report --base REF     diff against REF and render markdown\n' +
+        '  vibes preview --given G --then T [--then T2] [--why W] [--covers C]\n' +
+        '                              render a claim you are writing, and lint it\n' +
+        '  vibes preview [--id X] [--suite S] [--file F]\n' +
+        '                              render claims already in ' + LEDGER + '\n' +
+        '  vibes lint [--id X] [--suite S] [--file F] [--allow w,w] [--warn-only]\n' +
+        '                              check ' + LEDGER + ' against the decidable half of CLAIMS.md\n\n' +
+        'preview and lint run NO suites — they read what is committed, or what you type.\n\n' +
+        'Exit: 0 ok · 1 a behaviour broke or was removed · 2 usage · 3 a suite could not run\n' +
+        '      4 a claim needs rewriting\n',
     );
     return EXIT.OK;
   }
@@ -97,6 +140,73 @@ export async function main(argv: readonly string[]): Promise<number> {
       process.stdout.write(text);
     }
     return EXIT.OK;
+  }
+
+  /* preview and lint are the writing loop, so neither may run a suite: a check
+   * that costs a full test run is a check nobody runs while writing, which is
+   * how the rules came to be enforced only on pull requests. */
+  if (cmd === 'preview' || cmd === 'lint') {
+    const opts = lintOptions(root, argv);
+    const filter: PreviewFilter = {};
+    for (const k of ['id', 'suite', 'file'] as const) {
+      const v = flag(argv, k);
+      if (v !== undefined && v !== '') Object.assign(filter, { [k]: v });
+    }
+
+    const given = flag(argv, 'given');
+    const thens = flags(argv, 'then');
+    if (cmd === 'preview' && given !== undefined && given !== '') {
+      if (thens.length === 0) {
+        process.stderr.write('vibes preview: --given needs at least one --then\n');
+        return EXIT.USAGE;
+      }
+      const whys = flags(argv, 'why');
+      const covers = flag(argv, 'covers');
+      const claim = {
+        given,
+        expectations: thens.map((t, i) => {
+          const w = whys[i];
+          return w === undefined ? { then: t } : { then: t, why: w };
+        }),
+        ...(covers === undefined || covers === '' ? {} : { covers }),
+      };
+      process.stdout.write(`${previewInline(claim)}\n`);
+      const findings = lintInline(claim, opts);
+      if (findings.length > 0) process.stdout.write(`\n${formatFindings(findings)}\n`);
+      // Read it aloud. The lint cannot hear a sentence with no main clause.
+      return countBySeverity(findings).errors > 0 ? EXIT.LINT : EXIT.OK;
+    }
+
+    const ledger = committedLedger(root);
+    if (ledger.length === 0) {
+      process.stderr.write(`vibes ${cmd}: ${LEDGER} is empty or missing — run \`vibes collect --write\` first\n`);
+      return EXIT.USAGE;
+    }
+
+    if (cmd === 'preview') {
+      const text = previewLedger(ledger, filter);
+      if (text === '') {
+        process.stderr.write(`vibes preview: nothing in ${LEDGER} matches\n`);
+        return EXIT.USAGE;
+      }
+      process.stdout.write(`${text}\n`);
+      return EXIT.OK;
+    }
+
+    const scoped = ledger.filter((b) => {
+      if (filter.id !== undefined && !b.id.includes(filter.id)) return false;
+      if (filter.suite !== undefined && b.suite !== filter.suite) return false;
+      if (filter.file !== undefined && !b.file.includes(filter.file)) return false;
+      return true;
+    });
+    const findings = lintLedger(scoped, opts);
+    if (findings.length > 0) process.stdout.write(`${formatFindings(findings)}\n\n`);
+    const { errors, warnings } = countBySeverity(findings);
+    process.stdout.write(
+      `${String(scoped.length)} claim(s) linted — ${String(errors)} error(s), ${String(warnings)} warning(s)\n`,
+    );
+    if (argv.includes('--warn-only')) return EXIT.OK;
+    return errors > 0 ? EXIT.LINT : EXIT.OK;
   }
 
   if (cmd !== 'report') {
