@@ -87,13 +87,18 @@ describe('a respecification is a changed claim', () => {
     ];
     const md = renderMarkdown(diffLedgers(before, after));
     expect(md).toContain('1 behaviour respecified');
-    expect(md).toContain('was: **a relative move is not offset by the gauge length, because it is a distance rather than a destination**');
-    expect(md).toContain('now: **a relative move is not offset by the gauge length, because it states a distance to travel**');
-    expect(md).toContain('  - because:');
-    expect(md).toContain('    - was: old reason');
-    expect(md).toContain('    - now: new reason');
+    // The row IS the claim as it now reads, in the shape every other row has,
+    // so a reader judges it the same way. What it replaced sits under it.
+    expect(md).toContain(
+      '- **When** a situation\n' +
+        '  - a relative move is not offset by the gauge length, because it states a distance to travel `BH-1`\n' +
+        '    <sub>was: a relative move is not offset by the gauge length, because it is a distance rather than a destination</sub>\n' +
+        '    <sub>new reason</sub>\n' +
+        '    <sub>was, because: old reason</sub>',
+    );
     expect(md).not.toMatch(/because was/);
     expect(md).not.toContain('also changed');
+    expect(md).not.toContain('now:');
   });
 
   it('heads a group with its file and names the test in the row', () => {
@@ -117,9 +122,24 @@ describe('a respecification is a changed claim', () => {
     expect(d.respecified).toHaveLength(1);
     expect(d.respecified[0]?.fields).toEqual(['given']);
     const md = renderMarkdown(d);
-    expect(md).toContain('  - given:');
-    expect(md).toContain('    - was: old scene');
-    expect(md).toContain('    - now: new scene');
+    expect(md).toContain('- **When** new scene\n  <sub>was: old scene</sub>\n  - the machine stays disabled `BH-1`');
+  });
+
+  it('prints one scene for two expectations reworded under it', () => {
+    const before = [
+      row({ id: 'a', expect: 'x', then: 'old x', given: 'old scene' }),
+      row({ id: 'a', expect: 'y', then: 'old y', given: 'old scene', num: 2 }),
+    ];
+    const after = [
+      row({ id: 'a', expect: 'x', then: 'new x', given: 'new scene' }),
+      row({ id: 'a', expect: 'y', then: 'new y', given: 'new scene', num: 2 }),
+    ];
+    const md = renderMarkdown(diffLedgers(before, after));
+    const section = md.slice(md.indexOf('## Respecified'));
+    expect(section.match(/\*\*When\*\*/g)).toHaveLength(1);
+    expect(section.match(/<sub>was: old scene<\/sub>/g)).toHaveLength(1);
+    expect(section).toContain('  - new x `BH-1`\n    <sub>was: old x</sub>');
+    expect(section).toContain('  - new y `BH-2`\n    <sub>was: old y</sub>');
   });
 
   it('does not print the claim twice when the test is named after it', () => {

@@ -7,7 +7,7 @@
  * reads as "green" to someone skimming, which is how a report stops being read.
  */
 
-import { handle, testKey, type Behaviour } from './ledger.js';
+import { handle, key, testKey, type Behaviour } from './ledger.js';
 import type { LedgerDiff, Respecified } from './diff.js';
 
 export function headline(d: LedgerDiff): string {
@@ -44,30 +44,34 @@ export function headline(d: LedgerDiff): string {
  * one run-on paragraph — which reads as though two separate specs collided. */
 const BR = '  \n';
 
-/** "BH-42 · ", or nothing at all for a record that predates numbering. */
-function cite(b: Behaviour): string {
-  const h = handle(b);
-  return h === '' ? '' : `${h} · `;
-}
-
 /**
  * One test: its condition once, then every expectation that hangs off it.
  *
  * Grouping is the point of the shape. Printing the condition again beside each
  * expectation would put back exactly the repetition that splitting them removed.
  */
-export function oneTest(group: readonly Behaviour[], withFile = true): string {
+/** Lines a caller wants under a row's parts: after the scene, after each
+ *  expectation's sentence, after its reason. A respecified row uses these to
+ *  put what a line replaced directly beneath it. */
+export interface RowNotes {
+  readonly scene?: readonly string[];
+  readonly expectation?: (b: Behaviour) => { readonly afterThen?: readonly string[]; readonly afterWhy?: readonly string[] };
+}
+
+export function oneTest(group: readonly Behaviour[], withFile = true, notes: RowNotes = {}): string {
   const first = group[0];
   if (first === undefined) return '';
 
   // The condition leads, marked, and each expectation is its own nested bullet.
   // Running them together as sibling lines left no way to see where one
   // expectation ended and the next began, or which half was the condition.
-  const lines = [`- **When** ${first.given}`];
+  const lines = [`- **When** ${first.given}`, ...(notes.scene ?? [])];
   for (const b of group) {
     const h = handle(b);
-    lines.push(`  - ${b.then}${h === '' ? '' : ` \`${h}\``}`);
+    const n = notes.expectation?.(b) ?? {};
+    lines.push(`  - ${b.then}${h === '' ? '' : ` \`${h}\``}`, ...(n.afterThen ?? []));
     if (b.why !== undefined) lines.push(`    <sub>${b.why}</sub>`);
+    lines.push(...(n.afterWhy ?? []));
   }
 
   // Where the reader is, once, in small type: the test this came from and the
@@ -97,28 +101,51 @@ function byTest(items: readonly Behaviour[]): Behaviour[][] {
 }
 
 
-/* Ordered by what a reviewer needs first. The claim is was/now on its own;
- * everything else nests the two texts under the field name so a reason cannot
- * render as "because was" — which names the field and hides the sentence. */
-const RESPEC_ORDER = ['then', 'given', 'why', 'covers'] as const;
-const RESPEC_LABEL = { given: 'given', why: 'because', covers: 'covers' } as const;
+/*
+ * A respecified claim is still a claim, and a reader judges it the way they
+ * judge a new one: scene first, then the expectation. So the row is the claim
+ * AS IT NOW READS, in the shape used everywhere else in the report, and each
+ * sentence it replaced sits in small type directly under the one that replaced
+ * it. Grouped by test, like everything else, so two expectations reworded
+ * under one scene do not print the scene twice.
+ *
+ * The earlier shape listed was/now per field — the expectation first, in bold,
+ * the scene after it, if at all. That made the reader assemble the sentence
+ * from parts, and for a rewording that kept the meaning (the usual case) it
+ * gave them no way to see that nothing had moved.
+ */
+function respec(group: readonly Respecified[]): string {
+  const first = group[0];
+  if (first === undefined) return '';
+  const byKey = new Map(group.map((r) => [key(r.after), r]));
+  const sceneMoved = group.find((r) => r.fields.includes('given'));
+  return oneTest(
+    group.map((r) => r.after),
+    true,
+    {
+      scene: sceneMoved === undefined ? [] : [`  <sub>was: ${sceneMoved.before.given}</sub>`],
+      expectation: (b) => {
+        const r = byKey.get(key(b));
+        if (r === undefined) return {};
+        const afterThen = r.fields.includes('then') ? [`    <sub>was: ${r.before.then}</sub>`] : [];
+        const afterWhy: string[] = [];
+        if (r.fields.includes('why') && r.before.why !== undefined) afterWhy.push(`    <sub>was, because: ${r.before.why}</sub>`);
+        if (r.fields.includes('covers') && r.before.covers !== undefined) afterWhy.push(`    <sub>covered \`${r.before.covers}\`</sub>`);
+        return { afterThen, afterWhy };
+      },
+    },
+  );
+}
 
-function respec(r: Respecified): string {
-  const lines = [`- ${cite(r.after)}\`${r.after.id}\``];
-  for (const f of RESPEC_ORDER) {
-    if (!r.fields.includes(f)) continue;
-    const was = r.before[f] ?? '(none)';
-    const now = r.after[f] ?? '(none)';
-    if (f === 'then') {
-      lines.push(`  - was: **${was}**`);
-      lines.push(`  - now: **${now}**`);
-      continue;
-    }
-    lines.push(`  - ${RESPEC_LABEL[f]}:`);
-    lines.push(`    - was: ${was}`);
-    lines.push(`    - now: ${now}`);
+/** Respecifications, grouped by the test they belong to, in ledger order. */
+function respecByTest(items: readonly Respecified[]): Respecified[][] {
+  const groups = new Map<string, Respecified[]>();
+  for (const r of items) {
+    const g = groups.get(testKey(r.after)) ?? [];
+    g.push(r);
+    groups.set(testKey(r.after), g);
   }
-  return lines.join('\n');
+  return [...groups.values()];
 }
 
 /** What changed, before any of it is read in detail. */
@@ -177,8 +204,11 @@ export function renderMarkdown(d: LedgerDiff, opts: RenderOptions = {}): string 
 
   if (d.respecified.length > 0) {
     out.push('## Respecified', '');
-    out.push('Same behaviour id, different claim. Read these as deliberate redefinitions.', '');
-    for (const r of d.respecified) out.push(respec(r));
+    out.push(
+      'Same expectation, different words. Each row is the claim as it now reads; what it replaced is beneath it in small type. A rewording that keeps the meaning is the usual case — a row that changes what the machine is claimed to do is the one to stop on.',
+      '',
+    );
+    for (const g of respecByTest(d.respecified)) out.push(respec(g));
     out.push('');
   }
 
