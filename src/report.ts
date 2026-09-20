@@ -56,7 +56,7 @@ function cite(b: Behaviour): string {
  * Grouping is the point of the shape. Printing the condition again beside each
  * expectation would put back exactly the repetition that splitting them removed.
  */
-function oneTest(group: readonly Behaviour[], withFile = true): string {
+export function oneTest(group: readonly Behaviour[], withFile = true): string {
   const first = group[0];
   if (first === undefined) return '';
 
@@ -72,11 +72,14 @@ function oneTest(group: readonly Behaviour[], withFile = true): string {
 
   // Where the reader is, once, in small type: the test this came from and the
   // code it covers. Under a file heading the path is already on screen.
+  // A preview of a claim that has not been collected yet has no file and no
+  // test name; rendering those as empty backticks would put a defect-looking
+  // artefact in front of the writer we are asking to read this line.
   const echoes = first.test.includes(first.given) || group.some((b) => first.test.includes(b.then));
   const where: string[] = [];
-  if (withFile) where.push(`\`${first.file}\``);
-  if (!echoes) where.push(`\`${first.test}\``);
-  if (first.covers !== undefined) where.push(`\`${first.covers}\``);
+  if (withFile && first.file !== '') where.push(`\`${first.file}\``);
+  if (!echoes && first.test !== '') where.push(`\`${first.test}\``);
+  if (first.covers !== undefined && first.covers !== '') where.push(`\`${first.covers}\``);
   if (where.length > 0) lines.push(`  <sub>${where.join(' · ')}</sub>`);
   return lines.join('\n');
 }

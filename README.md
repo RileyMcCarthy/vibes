@@ -41,7 +41,25 @@ node bin/vibes.mjs report --base main   # diff it and render markdown
 ```
 
 Exit codes: `0` ok, `1` a behaviour broke or was removed, `2` usage, `3` a suite
-could not run.
+could not run, `4` a claim needs rewriting.
+
+## While you are writing one
+
+Collecting runs every suite, so it is no use as a writing aid. These two run
+nothing:
+
+```bash
+node bin/vibes.mjs preview --given "a start with a leftover byte on the link" \
+                           --then "the start completes and the converter is converting"
+node bin/vibes.mjs preview --id ads122   # what is committed, as it renders
+node bin/vibes.mjs lint                  # every claim in the ledger
+```
+
+`preview` composes the exact line the reviewer will read — which is the only
+way to catch a scene and an expectation that each look fine alone and compose
+into a sentence with no main clause. `lint` checks the decidable half: names
+from the code, contrast words, vague claims, machinery in a claim. Both print
+the same findings.
 
 ## Writing claims worth reading
 
