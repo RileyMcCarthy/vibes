@@ -7,6 +7,15 @@
   "bin": {
     "vibes": "./bin/vibes.mjs"
   },
+  "exports": {
+    ".": "./dist/cli.js",
+    "./behaviour": "./bindings/ts/index.ts"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "bindings"
+  ],
   "engines": {
     "node": ">=20"
   },
@@ -14,7 +23,8 @@
     "build": "tsc -b",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "verify": "tsc --noEmit && vitest run"
+    "verify": "tsc --noEmit && vitest run",
+    "prepare": "npm run build"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
