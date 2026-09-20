@@ -19,6 +19,7 @@
  */
 
 import type { Behaviour } from './ledger.js';
+import { areaOf, capabilityFor, CAPABILITIES_FILE, type CapabilityMap } from './capabilities.js';
 
 export type Severity = 'error' | 'warn';
 
@@ -55,6 +56,10 @@ export type Allowance = string | { readonly words: readonly string[]; readonly i
 
 export interface LintOptions {
   readonly allow?: readonly Allowance[];
+  /** Once a repo declares capabilities, every area must have one. An area
+   *  left out would render as uncharted — visible, but the map is the spec's
+   *  table of contents and a hole in it is a hole in the spec. */
+  readonly capabilities?: CapabilityMap;
 }
 
 interface AllowEntry {
@@ -248,10 +253,26 @@ export interface LedgerFinding extends Finding {
 export function lintLedger(items: readonly Behaviour[], opts: LintOptions = {}): LedgerFinding[] {
   const out: LedgerFinding[] = [];
   const seenTest = new Set<string>();
+  const seenArea = new Set<string>();
   for (const b of items) {
     const testKey = `${b.suite}/${b.id}`;
     const first = !seenTest.has(testKey);
     seenTest.add(testKey);
+    if (opts.capabilities !== undefined) {
+      const area = `${b.suite}/${areaOf(b)}`;
+      if (!seenArea.has(area) && capabilityFor(opts.capabilities, b) === undefined) {
+        seenArea.add(area);
+        out.push({
+          rule: 'uncharted',
+          severity: 'error',
+          field: 'given',
+          message: `no capability declares \`${area}\` — add a heading for it to ${CAPABILITIES_FILE} saying what it is for`,
+          key: `${b.suite}/${b.id}/${b.expect}`,
+          file: b.file,
+          num: b.num,
+        });
+      }
+    }
     const claim: Claim = {
       given: b.given,
       then: b.then,

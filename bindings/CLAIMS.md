@@ -211,6 +211,44 @@ So: **rewording a claim is normal and encouraged — keep the `id`.** Change an
 (`-v2`) and never encode the wording in them.
 
 
+## The capability above the claim
+
+Every rule on this page makes one row readable. None of them can make a
+thousand rows mean anything, because a row is a unit test described politely
+and the thing a reader wants — *what is this a part of, and what is it for?* —
+is not in any row. Twelve rows drawn at random from a live ledger, each of
+which passes every rule:
+
+> When a write to an SD path whose directories do not yet exist → the records land in the file
+> When a test starting when the sample-data file cannot be opened → logging stays idle
+> When a session that connected and then logged undecodable protocol traffic → the flag names baud rate, wiring, or firmware as what to check
+
+The missing layer is declared once, in `vibes.capabilities.md` at the repo
+root — a heading per capability, ending in the id areas it owns, and a
+paragraph written for the operator:
+
+```markdown
+## Test data logging `firmware/monitor`
+
+Every sample taken during a test is written to the SD card as it happens, so
+a crash or power loss part-way through loses nothing already measured. Rows
+carry force, position, target and elapsed time in sample coordinates.
+```
+
+Write the paragraph to answer three things, in this order: **what the machine
+does** for whoever uses it, **why that matters** (what is lost if it fails),
+and, only if a reader needs it to judge the rows, **the shape of the thing**
+(what a row carries, what the units are). It is not a summary of the tests —
+the rows are the tests. It is the specification the rows are evidence for.
+
+The order of headings is the order the report uses: put what the operator
+sees first and the plumbing last. One heading may own several areas
+(`\`profile\` \`profiles\``); a `suite/area` key pins one suite's use of a
+name when two suites use it for different things. An area with no heading
+renders as **uncharted**, in the report and in `vibes preview`, and once the
+file exists `vibes lint` refuses it — the map is the spec's table of
+contents, and a hole in it is a hole in the spec.
+
 ## Checking a claim before it ships
 
 Two commands, neither of which runs a suite. Collecting the ledger runs every
@@ -241,6 +279,7 @@ grammar, and it is the check that would have caught the claim above.
 | `garden-path` | a participle that reads as a verb: "a byte **left** on the link" |
 | `restates` | six words of the scene coming back in its own expectation |
 | `ordinal-id` | an expectation id that names the order: `first`, `case2` |
+| `uncharted` | an id area no capability in `vibes.capabilities.md` declares |
 
 Exit 4 means a claim needs rewriting. Warnings do not fail; English is not
 decidable and a claim that reads fine is allowed to say so.

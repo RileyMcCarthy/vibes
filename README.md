@@ -61,6 +61,30 @@ into a sentence with no main clause. `lint` checks the decidable half: names
 from the code, contrast words, vague claims, machinery in a claim. Both print
 the same findings.
 
+## The capability above the claim
+
+A ledger row is a unit test described politely — *the records land in the
+file* — and a thousand of them grouped by file path read as a thousand
+mechanisms. The reader never learns what feature a row belongs to, what it is
+for, or what an operator would lose if it broke. So a repo declares that once,
+in prose, in `vibes.capabilities.md` at its root:
+
+```markdown
+## Test data logging `firmware/monitor`
+
+Every sample taken during a test is written to the SD card as it happens, so a
+crash part-way through loses nothing already measured.
+```
+
+Every claim hangs off a capability by the area its id already carries
+(`monitor.logging-writes-a-row` → `monitor`; a `suite/area` key pins one
+suite's use of a name). The report then leads with a table of which
+capabilities changed and how, groups every section under those headings with
+the paragraph printed above the rows, and `vibes preview` with no filter
+renders the whole ledger as a document — the paragraph, then the claims that
+hold it up. An area with no paragraph shows as **uncharted** rather than being
+hidden, and `vibes lint` refuses it once the file exists.
+
 ## Writing claims worth reading
 
 The report is read **instead of** the code, which is the whole design

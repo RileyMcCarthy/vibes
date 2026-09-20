@@ -18,6 +18,7 @@ import type { Behaviour } from './ledger.js';
 import { testKey } from './ledger.js';
 import { oneTest } from './report.js';
 import { lintClaim, type Finding, type LedgerFinding, type LintOptions } from './lint.js';
+import { groupByCapability, type CapabilityMap } from './capabilities.js';
 
 export interface PreviewFilter {
   /** Substring of the test id — the usual way in. */
@@ -41,16 +42,29 @@ function matches(b: Behaviour, f: PreviewFilter): boolean {
   return true;
 }
 
-/** Ledger rows, grouped by test and rendered as the report renders them. */
-export function previewLedger(items: readonly Behaviour[], filter: PreviewFilter = {}): string {
+function byTest(items: readonly Behaviour[]): Behaviour[][] {
   const groups = new Map<string, Behaviour[]>();
   for (const b of items) {
-    if (!matches(b, filter)) continue;
     const g = groups.get(testKey(b)) ?? [];
     g.push(b);
     groups.set(testKey(b), g);
   }
-  return [...groups.values()].map((g) => oneTest(g)).join('\n\n');
+  return [...groups.values()];
+}
+
+/**
+ * Ledger rows, grouped by test and rendered as the report renders them.
+ *
+ * With a capability map this is the whole specification as a document: each
+ * capability's paragraph, then the claims that hold it up. Without one it is
+ * the rows in ledger order.
+ */
+export function previewLedger(items: readonly Behaviour[], filter: PreviewFilter = {}, caps?: CapabilityMap): string {
+  const kept = items.filter((b) => matches(b, filter));
+  if (caps === undefined) return byTest(kept).map((g) => oneTest(g)).join('\n\n');
+  return groupByCapability(caps, kept, (b) => b)
+    .map((g) => [`### ${g.title}`, '', g.statement, '', ...byTest(g.items).map((t) => oneTest(t))].join('\n'))
+    .join('\n\n');
 }
 
 /** A claim that exists only in the editor, rendered as it will land. */

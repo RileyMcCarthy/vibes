@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { diffLedgers } from './diff.js';
 import type { Behaviour } from './ledger.js';
 import { renderMarkdown } from './report.js';
+import { parseCapabilities } from './capabilities.js';
 
 function row(over: {
   id: string;
@@ -176,5 +177,55 @@ describe('a respecification is a changed claim', () => {
   it('cites a numbered behaviour on its row', () => {
     const md = renderMarkdown(diffLedgers([], [row({ id: 'x.y', then: 'a claim', num: 42 })], []));
     expect(md).toContain('BH-42');
+  });
+});
+
+describe('a report with a capability map', () => {
+  const caps = parseCapabilities(
+    '## Test data logging `monitor`\n\nEvery sample is written to the card as it happens.\n\n## Motion `motion`\n\nHow the gantry moves.\n',
+  );
+
+  it('leads with a table of which capabilities changed, and how', () => {
+    const md = renderMarkdown(
+      diffLedgers(
+        [row({ id: 'monitor.old', then: 'old claim' })],
+        [row({ id: 'monitor.old', then: 'new claim' }), row({ id: 'motion.new', then: 'a move', num: 2 })],
+      ),
+      { capabilities: caps },
+    );
+    expect(md).toContain('| capability | respecified | new |');
+    expect(md).toContain('| Test data logging | 1 |  |');
+    expect(md).toContain('| Motion |  | 1 |');
+  });
+
+  it('heads each section with the capability and prints its paragraph once', () => {
+    const md = renderMarkdown(
+      diffLedgers(
+        [row({ id: 'monitor.a', then: 'old', num: 1 }), row({ id: 'monitor.b', then: 'gone', num: 2 })],
+        [row({ id: 'monitor.a', then: 'new', num: 1 }), row({ id: 'monitor.c', then: 'added', num: 3 })],
+      ),
+      { capabilities: caps },
+    );
+    // removed → respecified → new, all under the one capability
+    expect(md.match(/### Test data logging/g)).toHaveLength(2);
+    expect(md).toContain('<details><summary><b>Test data logging</b> — 1 expectation across 1 test</summary>');
+    expect(md.match(/Every sample is written to the card as it happens\./g)).toHaveLength(1);
+    // The paragraph came with the first appearance, which is the removal.
+    expect(md.indexOf('Every sample')).toBeLessThan(md.indexOf('## Respecified'));
+    expect(md).not.toContain('**src/x.ts**');
+  });
+
+  it('shows an area no capability declares as uncharted rather than hiding it', () => {
+    const md = renderMarkdown(diffLedgers([], [row({ id: 'sd.write', then: 'the records land in the file' })]), {
+      capabilities: caps,
+    });
+    expect(md).toContain('<b>Uncharted — `control/sd`</b>');
+    expect(md).toContain('No capability declares `control/sd`');
+  });
+
+  it('renders exactly as before when the repo has no map', () => {
+    const md = renderMarkdown(diffLedgers([], [row({ id: 'sd.write', then: 'the records land in the file' })]));
+    expect(md).toContain('<details><summary><b>control</b>');
+    expect(md).not.toContain('capability');
   });
 });
