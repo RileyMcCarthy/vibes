@@ -8,6 +8,7 @@
 import { describe, expect, it } from 'vitest';
 import { lintClaim, lintLedger, longestSharedRun, type Finding } from './lint.js';
 import type { Behaviour } from './ledger.js';
+import { parseCapabilities } from './capabilities.js';
 
 const rules = (fs: readonly Finding[]): string[] => fs.map((f) => f.rule);
 
@@ -146,5 +147,23 @@ describe('linting a ledger', () => {
     const [first] = lintLedger([row({})]);
     expect(first?.key).toBe('firmware/ads122.start/holds');
     expect(first?.num).toBe(1);
+  });
+});
+
+describe('the capability above the claim', () => {
+  const caps = parseCapabilities('## Monitoring `firmware/monitor`\n\nWhat it is for.\n');
+  const row = (id: string): Behaviour => ({
+    v: 2, num: 1, id, expect: 'holds', suite: 'firmware', lang: 'c', file: 'test/x.c', test: 't',
+    given: 'a scene', then: 'an outcome', status: 'pass',
+  });
+
+  it('refuses an area no capability declares, once per area', () => {
+    const findings = lintLedger([row('sd.a'), row('sd.b'), row('monitor.a')], { capabilities: caps });
+    expect(findings.map((f) => f.rule)).toEqual(['uncharted']);
+    expect(findings[0]?.message).toContain('`firmware/sd`');
+  });
+
+  it('asks nothing of a repo that has not written a map', () => {
+    expect(lintLedger([row('sd.a')])).toEqual([]);
   });
 });

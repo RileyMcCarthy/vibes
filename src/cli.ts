@@ -17,6 +17,7 @@ import { assignNumbers, parseLedger, serializeLedger, type Behaviour } from './l
 import { renderMarkdown } from './report.js';
 import { countBySeverity, lintLedger, type Allowance, type LintOptions } from './lint.js';
 import { formatFindings, lintInline, previewInline, previewLedger, type PreviewFilter } from './preview.js';
+import { CAPABILITIES_FILE, parseCapabilities, type CapabilityMap } from './capabilities.js';
 
 export const LEDGER = 'behaviours.jsonl';
 /** Optional, repo-root: `{ "allow": ["flush"] }` — words this repo's operators
@@ -59,6 +60,17 @@ function ledgerAt(root: string, ref: string): Behaviour[] {
 function committedLedger(root: string): Behaviour[] {
   const p = join(root, LEDGER);
   return existsSync(p) ? parseLedger(readFileSync(p, 'utf8')).ok : [];
+}
+
+/** The repo's capabilities, or undefined until it has written any. A map with
+ *  problems is still used — the problems are logged, and an unreadable
+ *  heading shows up as an uncharted area rather than silently vanishing. */
+function capabilities(root: string, log: (s: string) => void): CapabilityMap | undefined {
+  const p = join(root, CAPABILITIES_FILE);
+  if (!existsSync(p)) return undefined;
+  const map = parseCapabilities(readFileSync(p, 'utf8'));
+  for (const problem of map.problems) log(`vibes: ${CAPABILITIES_FILE}: ${problem}`);
+  return map;
 }
 
 function highWater(root: string): number {
@@ -111,7 +123,8 @@ function lintOptions(root: string, argv: readonly string[]): LintOptions {
   }
   const inline = flag(argv, 'allow');
   if (inline !== undefined && inline !== '') allow.push(...inline.split(',').map((w) => w.trim()));
-  return { allow };
+  const caps = capabilities(root, (s) => { process.stderr.write(`${s}\n`); });
+  return caps === undefined ? { allow } : { allow, capabilities: caps };
 }
 
 export async function main(argv: readonly string[]): Promise<number> {
@@ -130,7 +143,9 @@ export async function main(argv: readonly string[]): Promise<number> {
         '                              render claims already in ' + LEDGER + '\n' +
         '  vibes lint [--id X] [--suite S] [--file F] [--allow w,w] [--warn-only]\n' +
         '                              check ' + LEDGER + ' against the decidable half of CLAIMS.md\n\n' +
-        'preview and lint run NO suites — they read what is committed, or what you type.\n\n' +
+        'preview and lint run NO suites — they read what is committed, or what you type.\n' +
+        'With ' + CAPABILITIES_FILE + ' at the repo root, report and preview group every claim under\n' +
+        'the capability its id area belongs to, and lint refuses an area with none.\n\n' +
         'Exit: 0 ok · 1 a behaviour broke or was removed · 2 usage · 3 a suite could not run\n' +
         '      4 a claim needs rewriting\n',
     );
@@ -195,7 +210,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     }
 
     if (cmd === 'preview') {
-      const text = previewLedger(ledger, filter);
+      const text = previewLedger(ledger, filter, opts.capabilities);
       if (text === '') {
         process.stderr.write(`vibes preview: nothing in ${LEDGER} matches\n`);
         return EXIT.USAGE;
@@ -241,10 +256,13 @@ export async function main(argv: readonly string[]): Promise<number> {
   // Two renderings of the same diff. A PR comment is capped by GitHub at 64 KiB
   // and a big change blows past that, so the comment lists a readable slice and
   // says what it left out; the job summary, which has room, carries all of it.
-  process.stdout.write(renderMarkdown(d, { maxNew: COMMENT_MAX_NEW }));
+  const caps = capabilities(root, log);
+  const render = (maxNew?: number): string =>
+    renderMarkdown(d, { ...(maxNew === undefined ? {} : { maxNew }), ...(caps === undefined ? {} : { capabilities: caps }) });
+  process.stdout.write(render(COMMENT_MAX_NEW));
 
   const summary = process.env['GITHUB_STEP_SUMMARY'];
-  if (summary !== undefined && summary !== '') appendFileSync(summary, renderMarkdown(d));
+  if (summary !== undefined && summary !== '') appendFileSync(summary, render());
 
   // The committed ledger drifting from reality makes every future diff wrong,
   // so say so — but do not fail on it, because a PR that adds behaviour will
