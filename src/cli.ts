@@ -11,10 +11,13 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { postComment } from './comment.js';
 import { collect } from './collect.js';
-import { diffLedgers, hasRegression } from './diff.js';
+import { diffLedgers, hasRegression, isQuiet } from './diff.js';
+import { diffBase, loadPictures, renderPictureSection, resolveSha, writeGallery, type PictureView } from './images.js';
 import { assignNumbers, parseLedger, serializeLedger, type Behaviour } from './ledger.js';
-import { renderMarkdown } from './report.js';
+import { publishFiles } from './publish.js';
+import { combineReports, renderMarkdown } from './report.js';
 import { countBySeverity, lintLedger, type Allowance, type LintOptions } from './lint.js';
 import { formatFindings, lintInline, previewInline, previewLedger, type PreviewFilter } from './preview.js';
 import { CAPABILITIES_FILE, parseCapabilities, type CapabilityMap } from './capabilities.js';
@@ -142,7 +145,18 @@ export async function main(argv: readonly string[]): Promise<number> {
         '  vibes preview [--id X] [--suite S] [--file F]\n' +
         '                              render claims already in ' + LEDGER + '\n' +
         '  vibes lint [--id X] [--suite S] [--file F] [--allow w,w] [--warn-only]\n' +
-        '                              check ' + LEDGER + ' against the decidable half of CLAIMS.md\n\n' +
+        '                              check ' + LEDGER + ' against the decidable half of CLAIMS.md\n' +
+        '  vibes publish --dir D --ref B --into P\n' +
+        '                              push difference pictures to branch B at P/\n' +
+        '  vibes post --file F --repo O/R --pr N\n' +
+        '                              create or update the sticky report comment\n\n' +
+        '  report flags:\n' +
+        '    --github URL              raw-link committed pictures (https://github.com/owner/repo)\n' +
+        '    --head SHA                commit the new pictures are shown from (default HEAD)\n' +
+        '    --diff-dir DIR            write current/new/difference pages (default vibes-images)\n' +
+        '    --publish-ref BRANCH      with --into, the branch difference pictures will be pushed to\n' +
+        '    --into PATH               directory on that branch (usually the head sha)\n' +
+        '    --diff-base-url URL       fetch differences from here instead of the publish branch\n\n' +
         'preview and lint run NO suites — they read what is committed, or what you type.\n' +
         'With ' + CAPABILITIES_FILE + ' at the repo root, report and preview group every claim under\n' +
         'the capability its id area belongs to, and lint refuses an area with none.\n\n' +
@@ -167,6 +181,9 @@ export async function main(argv: readonly string[]): Promise<number> {
     }
     return EXIT.OK;
   }
+
+  if (cmd === 'publish') return publishCmd(root, argv, log);
+  if (cmd === 'post') return postCmd(argv, log);
 
   /* preview and lint are the writing loop, so neither may run a suite: a check
    * that costs a full test run is a check nobody runs while writing, which is
@@ -253,16 +270,33 @@ export async function main(argv: readonly string[]): Promise<number> {
   const numbered = assignNumbers(committedLedger(root), r.behaviours, highWater(root)).numbered;
   const d = diffLedgers(ledgerAt(root, base), numbered, r.silentSuites);
 
+  const view = pictureView(root, argv, base, log);
+  const images = loadPictures(root, base);
+  for (const p of images.problems) log(`vibes: ${p}`);
+  const pictureMd = renderPictureSection(images.pictures, images.problems, view);
+
+  const diffDir = flag(argv, 'diff-dir');
+  if (diffDir !== '') writeGallery(diffDir === undefined ? 'vibes-images' : diffDir, images.pictures, view);
+
+  // Pictures lead when the ledger has nothing a reviewer must act on, so a
+  // first look at the comment is the picture that changed. A busy ledger stays
+  // in front: a behaviour that stopped holding outranks a picture.
+  const caps = capabilities(root, log);
+  const render = (maxNew?: number): string =>
+    renderMarkdown(d, {
+      ...(maxNew === undefined ? {} : { maxNew }),
+      ...(caps === undefined ? {} : { capabilities: caps }),
+    });
+
   // Two renderings of the same diff. A PR comment is capped by GitHub at 64 KiB
   // and a big change blows past that, so the comment lists a readable slice and
   // says what it left out; the job summary, which has room, carries all of it.
-  const caps = capabilities(root, log);
-  const render = (maxNew?: number): string =>
-    renderMarkdown(d, { ...(maxNew === undefined ? {} : { maxNew }), ...(caps === undefined ? {} : { capabilities: caps }) });
-  process.stdout.write(render(COMMENT_MAX_NEW));
+  const comment = combineReports(render(COMMENT_MAX_NEW), pictureMd, isQuiet(d));
+  const full = combineReports(render(), pictureMd, isQuiet(d));
+  process.stdout.write(comment);
 
   const summary = process.env['GITHUB_STEP_SUMMARY'];
-  if (summary !== undefined && summary !== '') appendFileSync(summary, render());
+  if (summary !== undefined && summary !== '') appendFileSync(summary, full);
 
   // The committed ledger drifting from reality makes every future diff wrong,
   // so say so — but do not fail on it, because a PR that adds behaviour will
@@ -275,5 +309,96 @@ export async function main(argv: readonly string[]): Promise<number> {
   // A suite that failed to report is a collection failure even when every
   // OTHER suite is green — silence must not be able to hide inside a pass.
   if (d.unreported.length > 0) return EXIT.COLLECT;
-  return hasRegression(d) ? EXIT.REGRESSION : EXIT.OK;
+  if (hasRegression(d)) return EXIT.REGRESSION;
+  if (images.problems.length > 0) return EXIT.COLLECT;
+  return EXIT.OK;
+}
+
+function pictureView(root: string, argv: readonly string[], base: string, log: (s: string) => void): PictureView {
+  let baseSha: string | null = null;
+  let headSha: string | null = null;
+  try {
+    baseSha = resolveSha(root, base);
+  } catch (e) {
+    log(`vibes: could not resolve ${base} — ${(e as Error).message}`);
+  }
+  try {
+    headSha = flag(argv, 'head') || resolveSha(root, 'HEAD');
+  } catch (e) {
+    log(`vibes: could not resolve the new pictures' commit — ${(e as Error).message}`);
+  }
+  const github = flag(argv, 'github') || githubRepo();
+  return {
+    github,
+    baseSha,
+    headSha,
+    diffBaseUrl: diffBase(github, flag(argv, 'publish-ref') ?? null, flag(argv, 'into') ?? null, flag(argv, 'diff-base-url') ?? null),
+  };
+}
+
+function publishCmd(root: string, argv: readonly string[], log: (s: string) => void): number {
+  const dir = flag(argv, 'dir');
+  const ref = flag(argv, 'ref');
+  const into = flag(argv, 'into');
+  if (dir === undefined || dir === '' || ref === undefined || ref === '' || into === undefined || into === '') {
+    process.stderr.write('vibes publish: --dir, --ref, and --into are required\n');
+    return EXIT.USAGE;
+  }
+  const remote = flag(argv, 'remote');
+  try {
+    const result = publishFiles({
+      root,
+      dir,
+      ref,
+      into,
+      ...(remote !== undefined && remote !== '' ? { remote } : {}),
+    });
+    log(
+      result.files.length === 0
+        ? 'vibes: no difference pictures to publish'
+        : result.pushed
+          ? `vibes: published ${String(result.files.length)} difference picture(s) to ${ref}`
+          : 'vibes: difference pictures already published',
+    );
+    return EXIT.OK;
+  } catch (e) {
+    log(`vibes: could not publish difference pictures — ${(e as Error).message}`);
+    return EXIT.COLLECT;
+  }
+}
+
+function postCmd(argv: readonly string[], log: (s: string) => void): number {
+  const file = flag(argv, 'file');
+  const repo = flag(argv, 'repo') || process.env['GITHUB_REPOSITORY'] || '';
+  const pr = flag(argv, 'pr') || '';
+  if (file === undefined || file === '' || repo === '' || pr === '') {
+    process.stderr.write('vibes post: --file, --repo, and --pr are required\n');
+    return EXIT.USAGE;
+  }
+  if (!existsSync(file)) {
+    process.stderr.write(`vibes post: ${file} does not exist\n`);
+    return EXIT.USAGE;
+  }
+  const marker = flag(argv, 'marker');
+  try {
+    const result = postComment({
+      repo,
+      pr,
+      markdown: readFileSync(file, 'utf8'),
+      ...(marker !== undefined && marker !== '' ? { marker } : {}),
+    });
+    log(`vibes: ${result.action} comment ${result.id}`);
+    return EXIT.OK;
+  } catch (e) {
+    log(`vibes: could not post the report — ${(e as Error).message}`);
+    return EXIT.COLLECT;
+  }
+}
+
+/** https://github.com/owner/repo when Actions checked the repo out, else null. */
+function githubRepo(): string | null {
+  const server = process.env['GITHUB_SERVER_URL'];
+  const repo = process.env['GITHUB_REPOSITORY'];
+  if (server === undefined || server === '' || repo === undefined || repo === '') return null;
+  return `${server.replace(/\/$/, '')}/${repo}`;
 }

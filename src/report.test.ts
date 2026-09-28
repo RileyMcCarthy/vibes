@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { diffLedgers } from './diff.js';
+import { diffLedgers, isQuiet } from './diff.js';
 import type { Behaviour } from './ledger.js';
-import { renderMarkdown } from './report.js';
+import { combineReports, renderMarkdown } from './report.js';
 import { parseCapabilities } from './capabilities.js';
 
 function row(over: {
@@ -177,6 +177,26 @@ describe('a respecification is a changed claim', () => {
   it('cites a numbered behaviour on its row', () => {
     const md = renderMarkdown(diffLedgers([], [row({ id: 'x.y', then: 'a claim', num: 42 })], []));
     expect(md).toContain('BH-42');
+  });
+});
+
+describe('where a second section sits', () => {
+  it('leads with it when the ledger has nothing to read', () => {
+    expect(isQuiet(diffLedgers([], []))).toBe(true);
+    const md = combineReports('# Behaviours\n', '## Pictures\n\n', true);
+    expect(md.indexOf('## Pictures')).toBeLessThan(md.indexOf('# Behaviours'));
+  });
+
+  it('keeps the ledger in front when a behaviour was added', () => {
+    const d = diffLedgers([], [row({ id: 'x.y', then: 'a claim' })]);
+    expect(isQuiet(d)).toBe(false);
+    const md = combineReports('# Behaviours\n', '## Pictures\n\n', isQuiet(d));
+    expect(md.indexOf('# Behaviours')).toBeLessThan(md.indexOf('## Pictures'));
+  });
+
+  it('leaves the behaviour report unchanged when there is no second section', () => {
+    const body = renderMarkdown(diffLedgers([], []));
+    expect(combineReports(body, '', true)).toBe(body);
   });
 });
 
