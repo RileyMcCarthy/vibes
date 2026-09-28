@@ -43,6 +43,23 @@ node bin/vibes.mjs report --base main   # diff it and render markdown
 Exit codes: `0` ok, `1` a behaviour broke or was removed, `2` usage, `3` a suite
 could not run.
 
+## Picture benchmarks
+
+A repo can also list pictures a reviewer should see, in `vibes.images.json`.
+The report lays each picture that changed out in three columns — **current**
+(the base ref), **new** (this change), and **difference** (pixels that moved) —
+and prints the picture's metadata beside it. A picture the base ref does not
+have yet shows only **new**; the current and difference cells stay empty.
+Unchanged pictures are left out.
+
+```bash
+node bin/vibes.mjs report --base main \
+  --github https://github.com/owner/repo \
+  --diff-base-url https://github.com/owner/repo/raw/vibes-images/$HEAD
+```
+
+The contract is [`bindings/IMAGES.md`](bindings/IMAGES.md).
+
 ## Writing claims worth reading
 
 The report is read **instead of** the code, which is the whole design

@@ -16,6 +16,9 @@
     "test": "vitest run",
     "verify": "tsc --noEmit && vitest run"
   },
+  "dependencies": {
+    "pngjs": "^7.0.0"
+  },
   "devDependencies": {
     "@types/node": "^20.14.0",
     "typescript": "^5.6.0",
