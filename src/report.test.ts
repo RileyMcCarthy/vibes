@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { diffLedgers, isQuiet } from './diff.js';
 import type { Behaviour } from './ledger.js';
 import { combineReports, renderMarkdown } from './report.js';
+import { parseCapabilities } from './capabilities.js';
 
 function row(over: {
   id: string;
@@ -87,13 +88,18 @@ describe('a respecification is a changed claim', () => {
     ];
     const md = renderMarkdown(diffLedgers(before, after));
     expect(md).toContain('1 behaviour respecified');
-    expect(md).toContain('was: **a relative move is not offset by the gauge length, because it is a distance rather than a destination**');
-    expect(md).toContain('now: **a relative move is not offset by the gauge length, because it states a distance to travel**');
-    expect(md).toContain('  - because:');
-    expect(md).toContain('    - was: old reason');
-    expect(md).toContain('    - now: new reason');
+    // The row IS the claim as it now reads, in the shape every other row has,
+    // so a reader judges it the same way. What it replaced sits under it.
+    expect(md).toContain(
+      '- **When** a situation\n' +
+        '  - a relative move is not offset by the gauge length, because it states a distance to travel `BH-1`\n' +
+        '    <sub>was: a relative move is not offset by the gauge length, because it is a distance rather than a destination</sub>\n' +
+        '    <sub>new reason</sub>\n' +
+        '    <sub>was, because: old reason</sub>',
+    );
     expect(md).not.toMatch(/because was/);
     expect(md).not.toContain('also changed');
+    expect(md).not.toContain('now:');
   });
 
   it('heads a group with its file and names the test in the row', () => {
@@ -117,9 +123,24 @@ describe('a respecification is a changed claim', () => {
     expect(d.respecified).toHaveLength(1);
     expect(d.respecified[0]?.fields).toEqual(['given']);
     const md = renderMarkdown(d);
-    expect(md).toContain('  - given:');
-    expect(md).toContain('    - was: old scene');
-    expect(md).toContain('    - now: new scene');
+    expect(md).toContain('- **When** new scene\n  <sub>was: old scene</sub>\n  - the machine stays disabled `BH-1`');
+  });
+
+  it('prints one scene for two expectations reworded under it', () => {
+    const before = [
+      row({ id: 'a', expect: 'x', then: 'old x', given: 'old scene' }),
+      row({ id: 'a', expect: 'y', then: 'old y', given: 'old scene', num: 2 }),
+    ];
+    const after = [
+      row({ id: 'a', expect: 'x', then: 'new x', given: 'new scene' }),
+      row({ id: 'a', expect: 'y', then: 'new y', given: 'new scene', num: 2 }),
+    ];
+    const md = renderMarkdown(diffLedgers(before, after));
+    const section = md.slice(md.indexOf('## Respecified'));
+    expect(section.match(/\*\*When\*\*/g)).toHaveLength(1);
+    expect(section.match(/<sub>was: old scene<\/sub>/g)).toHaveLength(1);
+    expect(section).toContain('  - new x `BH-1`\n    <sub>was: old x</sub>');
+    expect(section).toContain('  - new y `BH-2`\n    <sub>was: old y</sub>');
   });
 
   it('does not print the claim twice when the test is named after it', () => {
@@ -176,5 +197,55 @@ describe('where a second section sits', () => {
   it('leaves the behaviour report unchanged when there is no second section', () => {
     const body = renderMarkdown(diffLedgers([], []));
     expect(combineReports(body, '', true)).toBe(body);
+  });
+});
+
+describe('a report with a capability map', () => {
+  const caps = parseCapabilities(
+    '## Test data logging `monitor`\n\nEvery sample is written to the card as it happens.\n\n## Motion `motion`\n\nHow the gantry moves.\n',
+  );
+
+  it('leads with a table of which capabilities changed, and how', () => {
+    const md = renderMarkdown(
+      diffLedgers(
+        [row({ id: 'monitor.old', then: 'old claim' })],
+        [row({ id: 'monitor.old', then: 'new claim' }), row({ id: 'motion.new', then: 'a move', num: 2 })],
+      ),
+      { capabilities: caps },
+    );
+    expect(md).toContain('| capability | respecified | new |');
+    expect(md).toContain('| Test data logging | 1 |  |');
+    expect(md).toContain('| Motion |  | 1 |');
+  });
+
+  it('heads each section with the capability and prints its paragraph once', () => {
+    const md = renderMarkdown(
+      diffLedgers(
+        [row({ id: 'monitor.a', then: 'old', num: 1 }), row({ id: 'monitor.b', then: 'gone', num: 2 })],
+        [row({ id: 'monitor.a', then: 'new', num: 1 }), row({ id: 'monitor.c', then: 'added', num: 3 })],
+      ),
+      { capabilities: caps },
+    );
+    // removed → respecified → new, all under the one capability
+    expect(md.match(/### Test data logging/g)).toHaveLength(2);
+    expect(md).toContain('<details><summary><b>Test data logging</b> — 1 expectation across 1 test</summary>');
+    expect(md.match(/Every sample is written to the card as it happens\./g)).toHaveLength(1);
+    // The paragraph came with the first appearance, which is the removal.
+    expect(md.indexOf('Every sample')).toBeLessThan(md.indexOf('## Respecified'));
+    expect(md).not.toContain('**src/x.ts**');
+  });
+
+  it('shows an area no capability declares as uncharted rather than hiding it', () => {
+    const md = renderMarkdown(diffLedgers([], [row({ id: 'sd.write', then: 'the records land in the file' })]), {
+      capabilities: caps,
+    });
+    expect(md).toContain('<b>Uncharted — `control/sd`</b>');
+    expect(md).toContain('No capability declares `control/sd`');
+  });
+
+  it('renders exactly as before when the repo has no map', () => {
+    const md = renderMarkdown(diffLedgers([], [row({ id: 'sd.write', then: 'the records land in the file' })]));
+    expect(md).toContain('<details><summary><b>control</b>');
+    expect(md).not.toContain('capability');
   });
 });

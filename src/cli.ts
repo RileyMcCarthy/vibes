@@ -4,6 +4,8 @@
  *   vibes collect            run every suite, print the ledger
  *   vibes collect --write    ... and update the committed ledger
  *   vibes report --base REF  diff the ledger against REF and render
+ *   vibes preview            render a claim as its reader will meet it
+ *   vibes lint               the decidable half of CLAIMS.md
  */
 
 import { execFileSync } from 'node:child_process';
@@ -16,14 +18,20 @@ import { diffBase, loadPictures, renderPictureSection, resolveSha, writeGallery,
 import { assignNumbers, parseLedger, serializeLedger, type Behaviour } from './ledger.js';
 import { publishFiles } from './publish.js';
 import { combineReports, renderMarkdown } from './report.js';
+import { countBySeverity, lintLedger, type Allowance, type LintOptions } from './lint.js';
+import { formatFindings, lintInline, previewInline, previewLedger, type PreviewFilter } from './preview.js';
+import { CAPABILITIES_FILE, parseCapabilities, type CapabilityMap } from './capabilities.js';
 
 export const LEDGER = 'behaviours.jsonl';
+/** Optional, repo-root: `{ "allow": ["flush"] }` — words this repo's operators
+ *  genuinely use, which the default vocabulary would otherwise flag. */
+export const LINT_CONFIG = 'vibes.lint.json';
 /** High-water mark for behaviour numbers. Separate from the ledger because it
  *  must remember numbers whose behaviours have been deleted — that is the whole
  *  point of it. On a merge conflict, keep the larger number. */
 export const COUNTER = 'behaviours.next';
 
-const EXIT = { OK: 0, REGRESSION: 1, USAGE: 2, COLLECT: 3 } as const;
+const EXIT = { OK: 0, REGRESSION: 1, USAGE: 2, COLLECT: 3, LINT: 4 } as const;
 
 /** Expectations listed under "New behaviour" in the PR comment. Enough to read
  *  a normal change whole; a bulk import says how much it held back. */
@@ -57,6 +65,17 @@ function committedLedger(root: string): Behaviour[] {
   return existsSync(p) ? parseLedger(readFileSync(p, 'utf8')).ok : [];
 }
 
+/** The repo's capabilities, or undefined until it has written any. A map with
+ *  problems is still used — the problems are logged, and an unreadable
+ *  heading shows up as an uncharted area rather than silently vanishing. */
+function capabilities(root: string, log: (s: string) => void): CapabilityMap | undefined {
+  const p = join(root, CAPABILITIES_FILE);
+  if (!existsSync(p)) return undefined;
+  const map = parseCapabilities(readFileSync(p, 'utf8'));
+  for (const problem of map.problems) log(`vibes: ${CAPABILITIES_FILE}: ${problem}`);
+  return map;
+}
+
 function highWater(root: string): number {
   const p = join(root, COUNTER);
   if (!existsSync(p)) return 0;
@@ -71,6 +90,46 @@ function flag(argv: readonly string[], name: string): string | undefined {
   return v === undefined || v.startsWith('--') ? '' : v;
 }
 
+/** Every occurrence — a test has several expectations, so `--then` repeats. */
+function flags(argv: readonly string[], name: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] !== `--${name}`) continue;
+    const v = argv[i + 1];
+    if (v !== undefined && !v.startsWith('--')) out.push(v);
+  }
+  return out;
+}
+
+function lintOptions(root: string, argv: readonly string[]): LintOptions {
+  const allow: Allowance[] = [];
+  const p = join(root, LINT_CONFIG);
+  if (existsSync(p)) {
+    try {
+      const cfg = JSON.parse(readFileSync(p, 'utf8')) as { allow?: unknown };
+      for (const entry of Array.isArray(cfg.allow) ? cfg.allow : []) {
+        if (typeof entry === 'string') {
+          allow.push(entry);
+          continue;
+        }
+        // A scoped entry, which is the shape that keeps an allowance honest.
+        // Anything else in the object (a note saying why) is ignored.
+        const e = entry as { words?: unknown; in?: unknown };
+        if (!Array.isArray(e.words)) continue;
+        const wordList = e.words.filter((w): w is string => typeof w === 'string');
+        allow.push(typeof e.in === 'string' ? { words: wordList, in: e.in } : { words: wordList });
+      }
+    } catch {
+      // A malformed config must not stop a lint from running; it only ever
+      // widens what is allowed, so the strict reading is the safe fallback.
+    }
+  }
+  const inline = flag(argv, 'allow');
+  if (inline !== undefined && inline !== '') allow.push(...inline.split(',').map((w) => w.trim()));
+  const caps = capabilities(root, (s) => { process.stderr.write(`${s}\n`); });
+  return caps === undefined ? { allow } : { allow, capabilities: caps };
+}
+
 export async function main(argv: readonly string[]): Promise<number> {
   const cmd = argv[0] ?? 'report';
   const root = repoRoot();
@@ -79,20 +138,30 @@ export async function main(argv: readonly string[]): Promise<number> {
   if (cmd === '--help' || cmd === 'help') {
     process.stdout.write(
       'vibes — what behaviour does this change add, and what stopped holding?\n\n' +
-        '  vibes collect [--write]          run every suite; --write updates ' + LEDGER + '\n' +
-        '  vibes report --base REF          diff against REF and render markdown\n' +
+        '  vibes collect [--write]     run every suite; --write updates ' + LEDGER + '\n' +
+        '  vibes report --base REF     diff against REF and render markdown\n' +
+        '  vibes preview --given G --then T [--then T2] [--why W] [--covers C]\n' +
+        '                              render a claim you are writing, and lint it\n' +
+        '  vibes preview [--id X] [--suite S] [--file F]\n' +
+        '                              render claims already in ' + LEDGER + '\n' +
+        '  vibes lint [--id X] [--suite S] [--file F] [--allow w,w] [--warn-only]\n' +
+        '                              check ' + LEDGER + ' against the decidable half of CLAIMS.md\n' +
         '  vibes publish --dir D --ref B --into P\n' +
-        '                                   push difference pictures to branch B at P/\n' +
+        '                              push difference pictures to branch B at P/\n' +
         '  vibes post --file F --repo O/R --pr N\n' +
-        '                                   create or update the sticky report comment\n\n' +
+        '                              create or update the sticky report comment\n\n' +
         '  report flags:\n' +
-        '    --github URL                   raw-link committed pictures (https://github.com/owner/repo)\n' +
-        '    --head SHA                     commit the new pictures are shown from (default HEAD)\n' +
-        '    --diff-dir DIR                 write current/new/difference pages (default vibes-images)\n' +
-        '    --publish-ref BRANCH           with --into, the branch difference pictures will be pushed to\n' +
-        '    --into PATH                    directory on that branch (usually the head sha)\n' +
-        '    --diff-base-url URL            fetch differences from here instead of the publish branch\n\n' +
-        'Exit: 0 ok · 1 a behaviour broke or was removed · 2 usage · 3 a suite could not run\n',
+        '    --github URL              raw-link committed pictures (https://github.com/owner/repo)\n' +
+        '    --head SHA                commit the new pictures are shown from (default HEAD)\n' +
+        '    --diff-dir DIR            write current/new/difference pages (default vibes-images)\n' +
+        '    --publish-ref BRANCH      with --into, the branch difference pictures will be pushed to\n' +
+        '    --into PATH               directory on that branch (usually the head sha)\n' +
+        '    --diff-base-url URL       fetch differences from here instead of the publish branch\n\n' +
+        'preview and lint run NO suites — they read what is committed, or what you type.\n' +
+        'With ' + CAPABILITIES_FILE + ' at the repo root, report and preview group every claim under\n' +
+        'the capability its id area belongs to, and lint refuses an area with none.\n\n' +
+        'Exit: 0 ok · 1 a behaviour broke or was removed · 2 usage · 3 a suite could not run\n' +
+        '      4 a claim needs rewriting\n',
     );
     return EXIT.OK;
   }
@@ -115,6 +184,73 @@ export async function main(argv: readonly string[]): Promise<number> {
 
   if (cmd === 'publish') return publishCmd(root, argv, log);
   if (cmd === 'post') return postCmd(argv, log);
+
+  /* preview and lint are the writing loop, so neither may run a suite: a check
+   * that costs a full test run is a check nobody runs while writing, which is
+   * how the rules came to be enforced only on pull requests. */
+  if (cmd === 'preview' || cmd === 'lint') {
+    const opts = lintOptions(root, argv);
+    const filter: PreviewFilter = {};
+    for (const k of ['id', 'suite', 'file'] as const) {
+      const v = flag(argv, k);
+      if (v !== undefined && v !== '') Object.assign(filter, { [k]: v });
+    }
+
+    const given = flag(argv, 'given');
+    const thens = flags(argv, 'then');
+    if (cmd === 'preview' && given !== undefined && given !== '') {
+      if (thens.length === 0) {
+        process.stderr.write('vibes preview: --given needs at least one --then\n');
+        return EXIT.USAGE;
+      }
+      const whys = flags(argv, 'why');
+      const covers = flag(argv, 'covers');
+      const claim = {
+        given,
+        expectations: thens.map((t, i) => {
+          const w = whys[i];
+          return w === undefined ? { then: t } : { then: t, why: w };
+        }),
+        ...(covers === undefined || covers === '' ? {} : { covers }),
+      };
+      process.stdout.write(`${previewInline(claim)}\n`);
+      const findings = lintInline(claim, opts);
+      if (findings.length > 0) process.stdout.write(`\n${formatFindings(findings)}\n`);
+      // Read it aloud. The lint cannot hear a sentence with no main clause.
+      return countBySeverity(findings).errors > 0 ? EXIT.LINT : EXIT.OK;
+    }
+
+    const ledger = committedLedger(root);
+    if (ledger.length === 0) {
+      process.stderr.write(`vibes ${cmd}: ${LEDGER} is empty or missing — run \`vibes collect --write\` first\n`);
+      return EXIT.USAGE;
+    }
+
+    if (cmd === 'preview') {
+      const text = previewLedger(ledger, filter, opts.capabilities);
+      if (text === '') {
+        process.stderr.write(`vibes preview: nothing in ${LEDGER} matches\n`);
+        return EXIT.USAGE;
+      }
+      process.stdout.write(`${text}\n`);
+      return EXIT.OK;
+    }
+
+    const scoped = ledger.filter((b) => {
+      if (filter.id !== undefined && !b.id.includes(filter.id)) return false;
+      if (filter.suite !== undefined && b.suite !== filter.suite) return false;
+      if (filter.file !== undefined && !b.file.includes(filter.file)) return false;
+      return true;
+    });
+    const findings = lintLedger(scoped, opts);
+    if (findings.length > 0) process.stdout.write(`${formatFindings(findings)}\n\n`);
+    const { errors, warnings } = countBySeverity(findings);
+    process.stdout.write(
+      `${String(scoped.length)} claim(s) linted — ${String(errors)} error(s), ${String(warnings)} warning(s)\n`,
+    );
+    if (argv.includes('--warn-only')) return EXIT.OK;
+    return errors > 0 ? EXIT.LINT : EXIT.OK;
+  }
 
   if (cmd !== 'report') {
     process.stderr.write(`vibes: unknown command "${cmd}"\n`);
@@ -145,12 +281,18 @@ export async function main(argv: readonly string[]): Promise<number> {
   // Pictures lead when the ledger has nothing a reviewer must act on, so a
   // first look at the comment is the picture that changed. A busy ledger stays
   // in front: a behaviour that stopped holding outranks a picture.
-  const comment = combineReports(renderMarkdown(d, { maxNew: COMMENT_MAX_NEW }), pictureMd, isQuiet(d));
-  const full = combineReports(renderMarkdown(d), pictureMd, isQuiet(d));
+  const caps = capabilities(root, log);
+  const render = (maxNew?: number): string =>
+    renderMarkdown(d, {
+      ...(maxNew === undefined ? {} : { maxNew }),
+      ...(caps === undefined ? {} : { capabilities: caps }),
+    });
 
   // Two renderings of the same diff. A PR comment is capped by GitHub at 64 KiB
   // and a big change blows past that, so the comment lists a readable slice and
   // says what it left out; the job summary, which has room, carries all of it.
+  const comment = combineReports(render(COMMENT_MAX_NEW), pictureMd, isQuiet(d));
+  const full = combineReports(render(), pictureMd, isQuiet(d));
   process.stdout.write(comment);
 
   const summary = process.env['GITHUB_STEP_SUMMARY'];
