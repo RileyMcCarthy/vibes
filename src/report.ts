@@ -140,6 +140,15 @@ export interface RenderOptions {
   readonly maxNew?: number;
 }
 
+/** Put `extra` in front of `body` when `lead` is set, otherwise after it.
+ *  An empty extra leaves the body untouched, so a repo with no pictures
+ *  still renders exactly the behaviour report. */
+export function combineReports(body: string, extra: string, lead: boolean): string {
+  if (extra === '') return body;
+  const block = extra.endsWith('\n') ? extra : `${extra}\n`;
+  return lead ? `${block}\n${body}` : `${body}\n${block}`;
+}
+
 export function renderMarkdown(d: LedgerDiff, opts: RenderOptions = {}): string {
   const out: string[] = [`# ${headline(d)}`, '', ...summary(d)];
 

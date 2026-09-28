@@ -38,27 +38,26 @@ for the wire contract and [`bindings/SUITE.md`](bindings/SUITE.md) for suites.
 ```bash
 node bin/vibes.mjs collect --write      # regenerate the ledger
 node bin/vibes.mjs report --base main   # diff it and render markdown
+node bin/vibes.mjs publish --dir vibes-images --ref vibes-images --into "$HEAD"
+node bin/vibes.mjs post --file vibes-report.md --repo owner/repo --pr "$PR"
 ```
 
 Exit codes: `0` ok, `1` a behaviour broke or was removed, `2` usage, `3` a suite
 could not run.
 
-## Picture benchmarks
+## Pictures
 
 A repo can also list pictures a reviewer should see, in `vibes.images.json`.
 The report lays each picture that changed out in three columns — **current**
 (the base ref), **new** (this change), and **difference** (pixels that moved) —
-and prints the picture's metadata beside it. A picture the base ref does not
-have yet shows only **new**; the current and difference cells stay empty.
+and prints whatever metadata the repo attached. A picture the base ref does
+not have yet shows only **new**; the current and difference cells stay empty.
 Unchanged pictures are left out.
 
-```bash
-node bin/vibes.mjs report --base main \
-  --github https://github.com/owner/repo \
-  --diff-base-url https://github.com/owner/repo/raw/vibes-images/$HEAD
-```
-
-The contract is [`bindings/IMAGES.md`](bindings/IMAGES.md).
+`report` writes the markdown and a local gallery. `publish` puts the
+difference files where the comment can load them, and `post` keeps a single
+comment on the pull request up to date. The contract, including the column
+rules, is [`bindings/IMAGES.md`](bindings/IMAGES.md).
 
 ## Writing claims worth reading
 

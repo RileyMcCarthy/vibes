@@ -1,19 +1,22 @@
 /**
- * Picture benchmarks a pull request should show beside the behaviour ledger.
+ * Pictures a pull request should show beside the behaviour ledger.
  *
- * A repo lists the pictures in vibes.images.json. For each one this module
- * reads the bytes at the base ref and the bytes in the work tree and says
- * which of the three columns a reviewer can actually see:
+ * A repo lists them in vibes.images.json. The only fields Vibes understands
+ * are the id, the title, and the path. Every other string on an entry is
+ * metadata the repo chose, printed beside the picture and never interpreted.
  *
- *   added    — the base ref has no such file. Current and difference are empty.
- *   changed  — both exist and differ. All three columns, difference drawn here.
- *   removed  — the base listed it and this change does not. New and difference
- *              are empty.
+ * For each id this module reads the bytes at the base ref and the bytes in
+ * the work tree:
+ *
+ *   added     — the base ref has no such file. Current and difference are empty.
+ *   changed   — both exist and differ. All three columns; the difference is drawn here.
+ *   removed   — the base listed it and this change does not. New and difference are empty.
  *   unchanged — byte for byte the same, so the report does not repeat it.
  *
- * The committed pictures are linked by their raw URL. A difference picture is
- * not a committed file; the caller writes it and, when it has published that
- * file, passes the URL it will live at.
+ * Committed pictures are linked by their raw URL. A difference picture is not
+ * a committed file. `cells` is the one place that decides which of the three
+ * columns has bytes and which has a URL; the markdown and the HTML gallery
+ * both render that.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -41,15 +44,22 @@ const { PNG } = require('pngjs') as { PNG: PngCtor };
 
 export const MANIFEST = 'vibes.images.json';
 
+/** A difference file is `<id>.diff.png`. `publish` looks for the same suffix. */
+export const DIFF_SUFFIX = '.diff.png';
+
+/** A channel this far from its pair has moved. At or under it, the pixel agrees.
+ *  Out-of-range pixels (a picture that grew) are compared against white. */
+export const CHANNEL_DELTA = 16;
+const AGREE: readonly [number, number, number] = [236, 236, 236];
+const MOVED: readonly [number, number, number] = [210, 32, 32];
+
 export type ImageStatus = 'added' | 'changed' | 'removed' | 'unchanged';
 
 export interface ImageDecl {
   readonly id: string;
   readonly title: string;
   readonly path: string;
-  readonly kind: string | null;
-  readonly board: string | null;
-  /** Other string fields on the manifest entry, in file order. */
+  /** String fields other than id, title, and path, in file order. */
   readonly meta: readonly (readonly [string, string])[];
   readonly from: string;
 }
@@ -69,12 +79,76 @@ export interface ImageLoad {
   readonly problems: readonly string[];
 }
 
-const ID_OK = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-const KNOWN = new Set(['id', 'title', 'path', 'kind', 'board']);
+/** One column of the review. `bytes` is what a local gallery can write.
+ *  `url` is what a comment can load. Either may be absent. */
+export interface Cell {
+  readonly label: 'Current' | 'New' | 'Difference';
+  readonly bytes: Buffer | null;
+  readonly url: string | null;
+  readonly filename: string;
+}
 
-/** Grey where the pictures agree, red where a pixel moved. Same reading as a
- *  schematic bench: a channel more than 16 apart counts as moved, and a
- *  picture that grew is compared on white. */
+export interface PictureView {
+  /** https://github.com/owner/repo, no trailing slash. */
+  readonly github: string | null;
+  readonly baseSha: string | null;
+  readonly headSha: string | null;
+  /** Where published difference pictures will be fetched from, no trailing
+   *  slash. A file is `<diffBaseUrl>/<id>.diff.png`. */
+  readonly diffBaseUrl: string | null;
+}
+
+const ID_OK = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const RESERVED = new Set(['id', 'title', 'path']);
+
+/** Where difference pictures are published, or the explicit URL when one was given. */
+export function diffBase(github: string | null, ref: string | null, into: string | null, explicit: string | null): string | null {
+  if (explicit !== null && explicit !== '') return explicit.replace(/\/$/, '');
+  if (github !== null && github !== '' && ref !== null && ref !== '' && into !== null && into !== '') {
+    return `${github.replace(/\/$/, '')}/raw/${ref}/${into}`;
+  }
+  return null;
+}
+
+export function rawUrl(github: string, sha: string, path: string): string {
+  const encoded = path.split('/').map((seg) => encodeURIComponent(seg)).join('/');
+  return `${github.replace(/\/$/, '')}/raw/${sha}/${encoded}`;
+}
+
+/** The three columns, in review order. A column with nothing to show has
+ *  neither bytes nor a URL, which is an empty cell — not a placeholder word. */
+export function cells(p: Picture, view: PictureView): readonly [Cell, Cell, Cell] {
+  const id = p.decl.id;
+  const github = view.github;
+  return [
+    {
+      label: 'Current',
+      bytes: p.current,
+      filename: `${id}.current.png`,
+      url:
+        p.current !== null && p.currentPath !== null && github !== null && view.baseSha !== null
+          ? rawUrl(github, view.baseSha, p.currentPath)
+          : null,
+    },
+    {
+      label: 'New',
+      bytes: p.next,
+      filename: `${id}.new.png`,
+      url:
+        p.next !== null && github !== null && view.headSha !== null
+          ? rawUrl(github, view.headSha, p.decl.path)
+          : null,
+    },
+    {
+      label: 'Difference',
+      bytes: p.diff,
+      filename: `${id}${DIFF_SUFFIX}`,
+      url: p.diff !== null && view.diffBaseUrl !== null ? `${view.diffBaseUrl.replace(/\/$/, '')}/${id}${DIFF_SUFFIX}` : null,
+    },
+  ];
+}
+
+/** Grey where the pictures agree, red where a pixel moved. */
 export function diffPng(saved: Buffer, next: Buffer): Buffer {
   const old = PNG.sync.read(saved);
   const nxt = PNG.sync.read(next);
@@ -85,11 +159,13 @@ export function diffPng(saved: Buffer, next: Buffer): Buffer {
     for (let x = 0; x < width; x++) {
       const o = sample(old, x, y);
       const n = sample(nxt, x, y);
-      const moved = Math.max(Math.abs(o[0] - n[0]), Math.abs(o[1] - n[1]), Math.abs(o[2] - n[2])) > 16;
+      const moved =
+        Math.max(Math.abs(o[0] - n[0]), Math.abs(o[1] - n[1]), Math.abs(o[2] - n[2])) > CHANNEL_DELTA;
+      const rgb = moved ? MOVED : AGREE;
       const i = (width * y + x) * 4;
-      out.data[i] = moved ? 210 : 236;
-      out.data[i + 1] = moved ? 32 : 236;
-      out.data[i + 2] = moved ? 32 : 236;
+      out.data[i] = rgb[0];
+      out.data[i + 1] = rgb[1];
+      out.data[i + 2] = rgb[2];
       out.data[i + 3] = 255;
     }
   }
@@ -102,6 +178,17 @@ function sample(img: PngImage, x: number, y: number): readonly [number, number, 
   return [img.data[i] ?? 255, img.data[i + 1] ?? 255, img.data[i + 2] ?? 255];
 }
 
+function picture(
+  decl: ImageDecl,
+  status: ImageStatus,
+  currentPath: string | null,
+  current: Buffer | null,
+  next: Buffer | null,
+  diff: Buffer | null,
+): Picture {
+  return { decl, status, currentPath, current, next, diff };
+}
+
 export function classify(
   decl: ImageDecl,
   current: Buffer | null,
@@ -109,25 +196,16 @@ export function classify(
   currentPath: string | null = null,
 ): Picture {
   const savedAt = current === null ? null : (currentPath ?? decl.path);
-  if (current === null && next === null) {
-    return { decl, status: 'removed', currentPath: null, current: null, next: null, diff: null };
-  }
-  if (current === null) {
-    return { decl, status: 'added', currentPath: null, current: null, next, diff: null };
-  }
-  if (next === null) {
-    return { decl, status: 'removed', currentPath: savedAt, current, next: null, diff: null };
-  }
-  if (current.equals(next)) {
-    return { decl, status: 'unchanged', currentPath: savedAt, current, next, diff: null };
-  }
+  if (current === null) return picture(decl, 'added', null, null, next, null);
+  if (next === null) return picture(decl, 'removed', savedAt, current, null, null);
+  if (current.equals(next)) return picture(decl, 'unchanged', savedAt, current, next, null);
   let diff: Buffer | null = null;
   try {
     diff = diffPng(current, next);
   } catch {
     diff = null;
   }
-  return { decl, status: 'changed', currentPath: savedAt, current, next, diff };
+  return picture(decl, 'changed', savedAt, current, next, diff);
 }
 
 function git(root: string, args: readonly string[], encoding: 'utf8'): string;
@@ -137,6 +215,8 @@ function git(root: string, args: readonly string[], encoding: 'utf8' | 'buffer')
     cwd: root,
     encoding,
     maxBuffer: 1 << 28,
+    // A missing path is handled by the caller. git's "fatal:" line would
+    // otherwise leak into every first-adoption log.
     stdio: ['ignore', 'pipe', 'ignore'],
   });
 }
@@ -203,59 +283,39 @@ export function parseManifest(text: string, file: string): { decls: ImageDecl[];
   const decls: ImageDecl[] = [];
   for (const [index, raw] of rec['images'].entries()) {
     const where = `${file}: images[${String(index)}]`;
-    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-      problems.push(`${where}: expected an object`);
-      continue;
-    }
-    const row = raw as Record<string, unknown>;
-    const id = row['id'];
-    const title = row['title'];
-    const path = row['path'];
-    if (typeof id !== 'string' || !ID_OK.test(id)) {
-      problems.push(`${where}: id must be a token of letters, digits, '.', '_' or '-'`);
-      continue;
-    }
-    if (typeof title !== 'string' || title.trim() === '') {
-      problems.push(`${where}: title must be a non-empty string`);
-      continue;
-    }
-    if (typeof path !== 'string' || relPath(path) === null) {
-      problems.push(`${where}: path must be a relative path inside the repo`);
-      continue;
-    }
-    const kind = optionalString(row['kind']);
-    const board = optionalString(row['board']);
-    if (row['kind'] !== undefined && kind === null) {
-      problems.push(`${where}: kind must be a string`);
-      continue;
-    }
-    if (row['board'] !== undefined && board === null) {
-      problems.push(`${where}: board must be a string`);
-      continue;
-    }
-    const meta: [string, string][] = [];
-    let metaOk = true;
-    for (const [key, value] of Object.entries(row)) {
-      if (KNOWN.has(key)) continue;
-      if (typeof value !== 'string') {
-        problems.push(`${where}: ${key} must be a string`);
-        metaOk = false;
-        break;
-      }
-      meta.push([key, value]);
-    }
-    if (!metaOk) continue;
-    decls.push({ id, title, path, kind, board, meta, from: file });
+    const parsed = parseEntry(raw, where);
+    if (typeof parsed === 'string') problems.push(parsed);
+    else decls.push({ ...parsed, from: file });
   }
   return { decls, problems };
 }
 
-function optionalString(value: unknown): string | null {
-  return typeof value === 'string' ? value : null;
+function parseEntry(raw: unknown, where: string): Omit<ImageDecl, 'from'> | string {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return `${where}: expected an object`;
+  const row = raw as Record<string, unknown>;
+  const id = row['id'];
+  const title = row['title'];
+  const path = row['path'];
+  if (typeof id !== 'string' || !ID_OK.test(id)) {
+    return `${where}: id must be a token of letters, digits, '.', '_' or '-'`;
+  }
+  if (typeof title !== 'string' || title.trim() === '') return `${where}: title must be a non-empty string`;
+  if (typeof path !== 'string' || relPath(path) === null) return `${where}: path must be a relative path inside the repo`;
+  const meta: [string, string][] = [];
+  for (const [key, value] of Object.entries(row)) {
+    if (RESERVED.has(key)) continue;
+    if (typeof value !== 'string') return `${where}: ${key} must be a string`;
+    meta.push([key, value]);
+  }
+  return { id, title, path, meta };
+}
+
+interface Slot {
+  head: ImageDecl | null;
+  base: ImageDecl | null;
 }
 
 function loadDecls(root: string, ref: string | null): { decls: ImageDecl[]; problems: string[] } {
-  const decls: ImageDecl[] = [];
   const problems: string[] = [];
   let paths: readonly string[];
   try {
@@ -263,6 +323,7 @@ function loadDecls(root: string, ref: string | null): { decls: ImageDecl[]; prob
   } catch (e) {
     return { decls: [], problems: [`could not list picture manifests${ref === null ? '' : ` at ${ref}`} — ${(e as Error).message}`] };
   }
+  const decls: ImageDecl[] = [];
   for (const file of paths) {
     const text = textAt(root, ref, file);
     if (text === null) {
@@ -276,77 +337,65 @@ function loadDecls(root: string, ref: string | null): { decls: ImageDecl[]; prob
   return { decls, problems };
 }
 
+function remember(map: Map<string, Slot>, order: string[], side: 'head' | 'base', decl: ImageDecl, problems: string[]): void {
+  if (!order.includes(decl.id)) order.push(decl.id);
+  const slot = map.get(decl.id) ?? { head: null, base: null };
+  if (slot[side] !== null) {
+    problems.push(`${decl.from}: duplicate picture id ${decl.id}`);
+    return;
+  }
+  slot[side] = decl;
+  map.set(decl.id, slot);
+}
+
 /**
- * Pictures declared on either side. Head is the work tree (ref null); base is
- * a commit-ish. An id is the picture's identity across the two manifests.
+ * Pictures declared on either side. Head is the work tree; base is a
+ * commit-ish. Order is the head manifest, then pictures that exist only at
+ * the base. An id is the picture's identity across the two manifests.
  */
 export function loadPictures(root: string, baseRef: string): ImageLoad {
   const problems: string[] = [];
   const head = loadDecls(root, null);
   const base = loadDecls(root, baseRef);
   problems.push(...head.problems, ...base.problems);
+  // A base ref we could not read is not "the base has no pictures". Reporting
+  // every current picture as added would hide that the comparison did not happen.
+  if (base.problems.some((p) => p.startsWith('could not list picture manifests'))) {
+    return { pictures: [], problems };
+  }
 
-  const byId = new Map<string, { head?: ImageDecl; base?: ImageDecl }>();
-  for (const decl of base.decls) {
-    const slot = byId.get(decl.id) ?? {};
-    if (slot.base !== undefined) problems.push(`${decl.from}: duplicate picture id ${decl.id}`);
-    slot.base = decl;
-    byId.set(decl.id, slot);
-  }
-  for (const decl of head.decls) {
-    const slot = byId.get(decl.id) ?? {};
-    if (slot.head !== undefined) problems.push(`${decl.from}: duplicate picture id ${decl.id}`);
-    slot.head = decl;
-    byId.set(decl.id, slot);
-  }
+  const byId = new Map<string, Slot>();
+  const order: string[] = [];
+  for (const decl of head.decls) remember(byId, order, 'head', decl, problems);
+  for (const decl of base.decls) remember(byId, order, 'base', decl, problems);
 
   const pictures: Picture[] = [];
-  for (const slot of byId.values()) {
+  for (const id of order) {
+    const slot = byId.get(id);
+    if (slot === undefined) continue;
     const decl = slot.head ?? slot.base;
-    if (decl === undefined) continue;
-    const path = slot.head?.path ?? slot.base?.path ?? decl.path;
+    if (decl === null) continue;
+    const path = slot.head?.path ?? decl.path;
     const basePath = slot.base?.path ?? path;
     let current: Buffer | null = null;
     let next: Buffer | null = null;
-    if (slot.base !== undefined) {
-      try {
-        current = blobAt(root, baseRef, basePath);
-      } catch (e) {
-        problems.push(`${basePath}: could not read the base picture — ${(e as Error).message}`);
-      }
-    }
-    if (slot.head !== undefined) {
-      try {
-        next = blobAt(root, null, path);
-      } catch (e) {
-        problems.push(`${path}: could not read the new picture — ${(e as Error).message}`);
-      }
+    if (slot.base !== null) current = blobAt(root, baseRef, basePath);
+    if (slot.head !== null) {
+      next = blobAt(root, null, path);
       if (next === null) problems.push(`${path}: declared in ${decl.from} but the file is not in the work tree`);
     }
     if (current === null && next === null) continue;
-    const picture = classify(slot.head ?? decl, current, next, slot.base === undefined ? null : basePath);
-    if (picture.status === 'changed' && picture.diff === null) {
+    const shown = classify(decl, current, next, slot.base === null ? null : basePath);
+    if (shown.status === 'changed' && shown.diff === null) {
       problems.push(`${path}: the picture changed but the difference could not be drawn`);
     }
-    pictures.push(picture);
+    pictures.push(shown);
   }
   return { pictures, problems };
 }
 
-export interface PictureView {
-  /** https://github.com/owner/repo, no trailing slash. Committed pictures are
-   *  loaded from `<github>/raw/<sha>/<path>`. */
-  readonly github: string | null;
-  readonly baseSha: string | null;
-  readonly headSha: string | null;
-  /** Where published difference pictures will be fetched from, no trailing
-   *  slash. A file is `<diffBaseUrl>/<id>.diff.png`. */
-  readonly diffBaseUrl: string | null;
-}
-
-export function rawUrl(github: string, sha: string, path: string): string {
-  const encoded = path.split('/').map((seg) => encodeURIComponent(seg)).join('/');
-  return `${github.replace(/\/$/, '')}/raw/${sha}/${encoded}`;
+export function resolveSha(root: string, ref: string): string {
+  return git(root, ['rev-parse', '--verify', `${ref}^{commit}`], 'utf8').trim();
 }
 
 function esc(s: string): string {
@@ -354,10 +403,9 @@ function esc(s: string): string {
 }
 
 function metaLine(p: Picture): string {
-  const d = p.decl;
-  const bits = [d.kind, d.board === null ? null : `board \`${d.board}\``, `\`${d.path}\``, p.status];
-  for (const [key, value] of d.meta) bits.push(`${key} \`${value}\``);
-  return bits.filter((b): b is string => b !== null && b !== '').join(' · ');
+  const bits = [`\`${p.decl.path}\``, p.status];
+  for (const [key, value] of p.decl.meta) bits.push(`${key} \`${value}\``);
+  return bits.join(' · ');
 }
 
 function img(alt: string, src: string | null): string {
@@ -368,7 +416,6 @@ function img(alt: string, src: string | null): string {
 /**
  * The review section. Unchanged pictures are counted only when something else
  * is on screen; a change that touches no picture produces no section at all.
- * A column with no picture is an empty cell, not a placeholder word.
  */
 export function renderPictures(pictures: readonly Picture[], view: PictureView): string {
   const shown = pictures.filter((p) => p.status !== 'unchanged');
@@ -376,23 +423,11 @@ export function renderPictures(pictures: readonly Picture[], view: PictureView):
   const unchanged = pictures.length - shown.length;
   const lines: string[] = ['## Pictures', ''];
   for (const p of shown) {
-    const current =
-      p.current !== null && p.currentPath !== null && view.github !== null && view.baseSha !== null
-        ? rawUrl(view.github, view.baseSha, p.currentPath)
-        : null;
-    const nextSrc =
-      p.next !== null && view.github !== null && view.headSha !== null
-        ? rawUrl(view.github, view.headSha, p.decl.path)
-        : null;
-    const diffSrc =
-      p.diff !== null && view.diffBaseUrl !== null ? `${view.diffBaseUrl.replace(/\/$/, '')}/${p.decl.id}.diff.png` : null;
+    const row = cells(p, view).map((c) => img(`${p.decl.title}, ${c.label.toLowerCase()}`, c.url));
     lines.push(`### ${esc(p.decl.title)}`, '', esc(metaLine(p)), '');
-    lines.push('| Current | New | Difference |', '|---|---|---|');
-    lines.push(`| ${img(`${p.decl.title}, current`, current)} | ${img(`${p.decl.title}, new`, nextSrc)} | ${img(`${p.decl.title}, difference`, diffSrc)} |`, '');
+    lines.push('| Current | New | Difference |', '|---|---|---|', `| ${row.join(' | ')} |`, '');
   }
-  if (unchanged > 0) {
-    lines.push(`_${String(unchanged)} picture${unchanged === 1 ? '' : 's'} unchanged._`, '');
-  }
+  if (unchanged > 0) lines.push(`_${String(unchanged)} picture${unchanged === 1 ? '' : 's'} unchanged._`, '');
   return lines.join('\n');
 }
 
@@ -402,9 +437,19 @@ export function renderImageProblems(problems: readonly string[]): string {
   return ['### Could not read', '', ...problems.map((p) => `- ${p}`), ''].join('\n');
 }
 
-/** Write the difference (and copies of current and new) so a browser can open
- *  them without GitHub. Returns the number of difference files written. */
-export function writeGallery(dir: string, pictures: readonly Picture[]): number {
+/** Pictures, then anything that could not be read. Neither means no section. */
+export function renderPictureSection(pictures: readonly Picture[], problems: readonly string[], view: PictureView): string {
+  const body = renderPictures(pictures, view);
+  const errs = renderImageProblems(problems);
+  if (body === '' && errs === '') return '';
+  if (body === '') return `## Pictures\n\n${errs}`;
+  if (errs === '') return body;
+  return `${body}\n${errs}`;
+}
+
+/** Write the three columns so a browser can open them without GitHub.
+ *  Returns how many difference files were written. */
+export function writeGallery(dir: string, pictures: readonly Picture[], view: PictureView): number {
   const shown = pictures.filter((p) => p.status !== 'unchanged');
   if (shown.length === 0) return 0;
   mkdirSync(dir, { recursive: true });
@@ -416,29 +461,20 @@ export function writeGallery(dir: string, pictures: readonly Picture[]): number 
     '<p>Current, new, and the pixels that moved. An empty column is a picture this change does not have.</p>',
   ];
   for (const p of shown) {
-    const id = p.decl.id;
     blocks.push(`<h2>${esc(p.decl.title)}</h2>`);
     blocks.push(`<p>${esc(metaLine(p).replace(/`/g, ''))}</p>`);
     blocks.push('<div class="row">');
-    for (const [label, bytes, name] of [
-      ['Current', p.current, `${id}.current.png`],
-      ['New', p.next, `${id}.new.png`],
-      ['Difference', p.diff, `${id}.diff.png`],
-    ] as const) {
-      if (bytes !== null) {
-        writeFileSync(join(dir, name), bytes);
-        if (label === 'Difference') diffs += 1;
-        blocks.push(`<figure><figcaption>${label}</figcaption><img src="${name}" alt="${esc(p.decl.title)}, ${label.toLowerCase()}"></figure>`);
+    for (const cell of cells(p, view)) {
+      if (cell.bytes !== null) {
+        writeFileSync(join(dir, cell.filename), cell.bytes);
+        if (cell.label === 'Difference') diffs += 1;
+        blocks.push(`<figure><figcaption>${cell.label}</figcaption><img src="${cell.filename}" alt="${esc(p.decl.title)}, ${cell.label.toLowerCase()}"></figure>`);
       } else {
-        blocks.push(`<figure><figcaption>${label}</figcaption></figure>`);
+        blocks.push(`<figure><figcaption>${cell.label}</figcaption></figure>`);
       }
     }
     blocks.push('</div>');
   }
   writeFileSync(join(dir, 'index.html'), blocks.join('\n'));
   return diffs;
-}
-
-export function resolveSha(root: string, ref: string): string {
-  return git(root, ['rev-parse', '--verify', `${ref}^{commit}`], 'utf8').trim();
 }
