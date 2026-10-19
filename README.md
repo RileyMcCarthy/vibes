@@ -43,7 +43,36 @@ node bin/vibes.mjs post --file vibes-report.md --repo owner/repo --pr "$PR"
 ```
 
 Exit codes: `0` ok, `1` a behaviour broke or was removed, `2` usage, `3` a suite
-could not run, `4` a claim needs rewriting.
+could not run, `4` a claim needs rewriting, `5` numbers collide or need settling.
+
+A suite that declares nothing on this machine — a sanitizer that will not start,
+a missing toolchain — keeps its committed rows when you `collect --write`; the
+run says nothing new about them, so it does not delete them.
+
+## Numbers, and two branches at once
+
+`collect --write` gives each new expectation the next number from
+`behaviours.next`. Until the branch merges, that number is **provisional**: a
+second open branch takes the same ones. Both branches change `behaviours.next`,
+so whichever merges second hits a conflict there — and that conflict is the cue.
+Do **not** keep the larger side by hand: `behaviours.jsonl` usually merges
+without a conflict, so both branches' rows would end up sharing numbers.
+Instead, after merging the base branch in:
+
+```bash
+node bin/vibes.mjs renumber --base origin/main          # settle, conflict markers and all
+node bin/vibes.mjs renumber --base origin/main --check  # CI: exit 5 if not settled
+```
+
+It runs no suites. A behaviour the base has gets the base's number back; a new
+one keeps its number unless that number is at or below the base's high-water
+mark or another new row holds it, in which case it moves past both. It prints
+every move, so a `BH-` citation you already wrote can follow. `lint` and
+`collect --write` refuse a ledger where two behaviours share a number.
+
+There is no merge driver on purpose: GitHub's merge button never runs one, and
+a driver that resolved `behaviours.next` would remove the one conflict that says
+a branch needs settling. Put `renumber --check` in a blocking CI job instead.
 
 ## While you are writing one
 
