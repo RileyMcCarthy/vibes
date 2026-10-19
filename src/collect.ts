@@ -30,6 +30,9 @@ export interface CollectResult {
    *  fails to START emits nothing at all, and without this the report says
    *  "this PR deleted N behaviours" about a build failure. */
   readonly silentSuites: readonly string[];
+  /** Suite files that could not be read or understood, so never ran. Their
+   *  name is unknown, so their committed rows cannot be carried forward. */
+  readonly unreadableSuites: readonly string[];
 }
 
 type Adapter = (text: string) => Map<string, Status>;
@@ -107,6 +110,7 @@ export function collect(repoRoot: string, log: (s: string) => void): CollectResu
   const problems: string[] = [];
   const behaviours: Behaviour[] = [];
   const silentSuites: string[] = [];
+  const unreadableSuites: string[] = [];
   const suiteFiles = findSuites(repoRoot);
 
   for (const rel of suiteFiles) {
@@ -117,10 +121,12 @@ export function collect(repoRoot: string, log: (s: string) => void): CollectResu
       suite = JSON.parse(readFileSync(abs, 'utf8')) as Suite;
     } catch (e) {
       problems.push(`${rel}: not valid JSON — ${(e as Error).message}`);
+      unreadableSuites.push(rel);
       continue;
     }
     if (suite.v !== 1) {
       problems.push(`${rel}: schema v${String(suite.v)} unsupported (expects v1)`);
+      unreadableSuites.push(rel);
       continue;
     }
     const adapter = ADAPTERS[suite.results];
@@ -128,6 +134,7 @@ export function collect(repoRoot: string, log: (s: string) => void): CollectResu
       problems.push(
         `${rel}: unknown results format ${JSON.stringify(suite.results)} — known: ${Object.keys(ADAPTERS).join(', ')}`,
       );
+      unreadableSuites.push(rel);
       continue;
     }
 
@@ -206,5 +213,5 @@ export function collect(repoRoot: string, log: (s: string) => void): CollectResu
     rmSync(scratch, { recursive: true, force: true });
   }
 
-  return { behaviours, problems, suitesRun: suiteFiles.length, silentSuites };
+  return { behaviours, problems, suitesRun: suiteFiles.length, silentSuites, unreadableSuites };
 }

@@ -6,6 +6,7 @@
  *   vibes report --base REF  diff the ledger against REF and render
  *   vibes preview            render a claim as its reader will meet it
  *   vibes lint               the decidable half of CLAIMS.md
+ *   vibes renumber --base REF  settle this branch's new numbers past REF's
  */
 
 import { execFileSync } from 'node:child_process';
@@ -15,7 +16,17 @@ import { postComment } from './comment.js';
 import { collect } from './collect.js';
 import { diffLedgers, hasRegression, isQuiet } from './diff.js';
 import { diffBase, loadPictures, renderPictureSection, resolveSha, writeGallery, type PictureView } from './images.js';
-import { assignNumbers, parseLedger, serializeLedger, type Behaviour } from './ledger.js';
+import {
+  assignNumbers,
+  carryForward,
+  duplicateNumbers,
+  isConflictMarker,
+  parseCounter,
+  parseLedger,
+  renumber,
+  serializeLedger,
+  type Behaviour,
+} from './ledger.js';
 import { publishFiles } from './publish.js';
 import { combineReports, renderMarkdown } from './report.js';
 import { countBySeverity, lintLedger, type Allowance, type LintOptions } from './lint.js';
@@ -28,10 +39,12 @@ export const LEDGER = 'behaviours.jsonl';
 export const LINT_CONFIG = 'vibes.lint.json';
 /** High-water mark for behaviour numbers. Separate from the ledger because it
  *  must remember numbers whose behaviours have been deleted — that is the whole
- *  point of it. On a merge conflict, keep the larger number. */
+ *  point of it. Two branches that both add behaviour both change it, and that
+ *  conflict is the signal to run `vibes renumber --base <the base branch>`;
+ *  keeping the larger side by hand leaves both branches' rows on one number. */
 export const COUNTER = 'behaviours.next';
 
-const EXIT = { OK: 0, REGRESSION: 1, USAGE: 2, COLLECT: 3, LINT: 4 } as const;
+const EXIT = { OK: 0, REGRESSION: 1, USAGE: 2, COLLECT: 3, LINT: 4, NUMBERING: 5 } as const;
 
 /** Expectations listed under "New behaviour" in the PR comment. Enough to read
  *  a normal change whole; a bulk import says how much it held back. */
@@ -78,9 +91,28 @@ function capabilities(root: string, log: (s: string) => void): CapabilityMap | u
 
 function highWater(root: string): number {
   const p = join(root, COUNTER);
-  if (!existsSync(p)) return 0;
-  const n = Number.parseInt(readFileSync(p, 'utf8').trim(), 10);
-  return Number.isFinite(n) && n > 0 ? n : 0;
+  return existsSync(p) ? parseCounter(readFileSync(p, 'utf8')) : 0;
+}
+
+/** A committed file at a ref, or undefined when the ref does not have it. */
+function fileAt(root: string, ref: string, path: string): string | undefined {
+  try {
+    return execFileSync('git', ['show', `${ref}:${path}`], {
+      cwd: root,
+      encoding: 'utf8',
+      maxBuffer: 1 << 28,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+/** One line per number held twice, or [] when every number is unique. */
+function describeDuplicates(items: readonly Behaviour[]): string[] {
+  return [...duplicateNumbers(items)]
+    .sort(([a], [b]) => a - b)
+    .map(([n, keys]) => `BH-${String(n)} is held by ${String(keys.length)} behaviours: ${keys.join(', ')}`);
 }
 
 function flag(argv: readonly string[], name: string): string | undefined {
@@ -146,6 +178,9 @@ export async function main(argv: readonly string[]): Promise<number> {
         '                              render claims already in ' + LEDGER + '\n' +
         '  vibes lint [--id X] [--suite S] [--file F] [--allow w,w] [--warn-only]\n' +
         '                              check ' + LEDGER + ' against the decidable half of CLAIMS.md\n' +
+        '  vibes renumber --base REF [--check]\n' +
+        '                              after merging REF in, move this branch\'s new numbers past\n' +
+        '                              REF\'s and rewrite ' + COUNTER + '; --check only reports\n' +
         '  vibes publish --dir D --ref B --into P\n' +
         '                              push difference pictures to branch B at P/\n' +
         '  vibes post --file F --repo O/R --pr N\n' +
@@ -161,7 +196,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         'With ' + CAPABILITIES_FILE + ' at the repo root, report and preview group every claim under\n' +
         'the capability its id area belongs to, and lint refuses an area with none.\n\n' +
         'Exit: 0 ok · 1 a behaviour broke or was removed · 2 usage · 3 a suite could not run\n' +
-        '      4 a claim needs rewriting\n',
+        '      4 a claim needs rewriting · 5 numbers collide or need settling\n',
     );
     return EXIT.OK;
   }
@@ -170,9 +205,27 @@ export async function main(argv: readonly string[]): Promise<number> {
     const r = collect(root, log);
     for (const p of r.problems) log(`vibes: ${p}`);
     if (r.behaviours.length === 0 && r.problems.length > 0) return EXIT.COLLECT;
-    const assigned = assignNumbers(committedLedger(root), r.behaviours, highWater(root));
+    const write = argv.includes('--write');
+    // A suite file that could not even be read has no name to carry rows
+    // under, so a ledger written now would silently lose them.
+    if (write && r.unreadableSuites.length > 0) {
+      log(`vibes: not writing ${LEDGER} — ${r.unreadableSuites.join(', ')} could not be read`);
+      return EXIT.COLLECT;
+    }
+    const committed = committedLedger(root);
+    for (const s of r.silentSuites) {
+      const kept = committed.filter((b) => b.suite === s).length;
+      if (kept > 0) log(`vibes: ${s} declared nothing here — keeping its ${String(kept)} committed behaviour(s) as they were`);
+    }
+    const assigned = assignNumbers(committed, carryForward(committed, r.behaviours, r.silentSuites), highWater(root));
+    const dups = describeDuplicates(assigned.numbered);
+    if (dups.length > 0) {
+      for (const d of dups) log(`vibes: ${d}`);
+      log('vibes: run `vibes renumber --base <the base branch>` to settle them');
+      if (write) return EXIT.NUMBERING;
+    }
     const text = serializeLedger(assigned.numbered);
-    if (argv.includes('--write')) {
+    if (write) {
       writeFileSync(join(root, LEDGER), text);
       writeFileSync(join(root, COUNTER), `${String(assigned.highWater)}\n`);
       log(`vibes: wrote ${LEDGER} — ${r.behaviours.length} behaviour(s), numbers up to BH-${String(assigned.highWater)}`);
@@ -182,6 +235,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     return EXIT.OK;
   }
 
+  if (cmd === 'renumber') return renumberCmd(root, argv, log);
   if (cmd === 'publish') return publishCmd(root, argv, log);
   if (cmd === 'post') return postCmd(argv, log);
 
@@ -242,7 +296,26 @@ export async function main(argv: readonly string[]): Promise<number> {
       if (filter.file !== undefined && !b.file.includes(filter.file)) return false;
       return true;
     });
-    const findings = lintLedger(scoped, opts);
+    // Uniqueness is a property of the whole ledger, so it is checked against
+    // all of it and reported against whichever holders are in scope.
+    const inScope = new Set(scoped.map((b) => `${b.suite}/${b.id}/${b.expect}`));
+    const byKey = new Map(scoped.map((b) => [`${b.suite}/${b.id}/${b.expect}`, b]));
+    const numberFindings = [...duplicateNumbers(ledger)].flatMap(([n, keys]) =>
+      keys
+        .filter((k) => inScope.has(k))
+        .map((k) => ({
+          rule: 'duplicate-number',
+          severity: 'error' as const,
+          field: 'expect' as const,
+          message:
+            `BH-${String(n)} is also held by ${keys.filter((o) => o !== k).join(', ')} — ` +
+            'a citation must name one claim; run `vibes renumber --base <the base branch>`',
+          key: k,
+          file: byKey.get(k)?.file ?? '',
+          num: n,
+        })),
+    );
+    const findings = [...numberFindings, ...lintLedger(scoped, opts)];
     if (findings.length > 0) process.stdout.write(`${formatFindings(findings)}\n\n`);
     const { errors, warnings } = countBySeverity(findings);
     process.stdout.write(
@@ -268,6 +341,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   if (r.behaviours.length === 0 && r.problems.length > 0) return EXIT.COLLECT;
 
   const numbered = assignNumbers(committedLedger(root), r.behaviours, highWater(root)).numbered;
+  for (const d of describeDuplicates(numbered)) log(`vibes: ${d}`);
   const d = diffLedgers(ledgerAt(root, base), numbered, r.silentSuites);
 
   const view = pictureView(root, argv, base, log);
@@ -334,6 +408,80 @@ function pictureView(root: string, argv: readonly string[], base: string, log: (
     headSha,
     diffBaseUrl: diffBase(github, flag(argv, 'publish-ref') ?? null, flag(argv, 'into') ?? null, flag(argv, 'diff-base-url') ?? null),
   };
+}
+
+/**
+ * Settle this branch's provisional numbers against the base branch.
+ *
+ * Runs no suites: it reads the ledger and counter as committed at `--base` and
+ * as they stand on disk — conflict markers and all, since the moment this is
+ * needed is straight after `git merge` stopped on them — and writes both back.
+ */
+function renumberCmd(root: string, argv: readonly string[], log: (s: string) => void): number {
+  const base = flag(argv, 'base');
+  if (base === undefined || base === '') {
+    process.stderr.write('vibes renumber: --base REF is required\n');
+    return EXIT.USAGE;
+  }
+  if (fileAt(root, base, '') === undefined) {
+    process.stderr.write(`vibes renumber: cannot read ${base} — fetch it first\n`);
+    return EXIT.USAGE;
+  }
+  const ledgerPath = join(root, LEDGER);
+  if (!existsSync(ledgerPath)) {
+    process.stderr.write(`vibes renumber: ${LEDGER} is missing\n`);
+    return EXIT.USAGE;
+  }
+  const raw = readFileSync(ledgerPath, 'utf8');
+  const markers = raw.split('\n').some(isConflictMarker);
+  const head = parseLedger(raw.split('\n').filter((l) => !isConflictMarker(l)).join('\n'));
+  if (head.bad.length > 0) {
+    for (const b of head.bad) log(`vibes renumber: ${LEDGER}: ${b}`);
+    return EXIT.USAGE;
+  }
+  // Both sides of a conflicted row survive the markers being dropped. Two
+  // copies of one behaviour that DIFFER are a real conflict, which only the
+  // author can resolve; identical copies are the same row twice.
+  const unique = new Map<string, Behaviour>();
+  const clashes: string[] = [];
+  for (const b of head.ok) {
+    const k = `${b.suite}/${b.id}/${b.expect}`;
+    const prior = unique.get(k);
+    if (prior !== undefined && JSON.stringify({ ...prior, num: 0 }) !== JSON.stringify({ ...b, num: 0 })) clashes.push(k);
+    unique.set(k, b);
+  }
+  if (clashes.length > 0) {
+    for (const k of clashes) log(`vibes renumber: ${k} differs between the two sides of the merge — resolve that row by hand`);
+    return EXIT.USAGE;
+  }
+
+  const counterPath = join(root, COUNTER);
+  const baseLedger = parseLedger(fileAt(root, base, LEDGER) ?? '').ok;
+  const baseHighWater = parseCounter(fileAt(root, base, COUNTER) ?? '');
+  const headHighWater = existsSync(counterPath) ? parseCounter(readFileSync(counterPath, 'utf8')) : 0;
+  const r = renumber(baseLedger, baseHighWater, [...unique.values()], headHighWater);
+
+  for (const m of r.moved) log(`vibes: ${m.key}: BH-${String(m.from)} → BH-${String(m.to)}`);
+  const text = serializeLedger(r.numbered);
+  const counter = `${String(r.highWater)}\n`;
+  const stale = text !== raw || !existsSync(counterPath) || readFileSync(counterPath, 'utf8') !== counter;
+
+  if (argv.includes('--check')) {
+    if (!stale && !markers) {
+      log(`vibes: numbers are settled against ${base}`);
+      return EXIT.OK;
+    }
+    log(`vibes: numbers are not settled against ${base} — run \`vibes renumber --base ${base}\` and commit the result`);
+    return EXIT.NUMBERING;
+  }
+  writeFileSync(ledgerPath, text);
+  writeFileSync(counterPath, counter);
+  log(
+    r.moved.length === 0
+      ? `vibes: numbers already settled against ${base}; ${COUNTER} is ${String(r.highWater)}`
+      : `vibes: moved ${String(r.moved.length)} number(s); ${COUNTER} is ${String(r.highWater)} — update any BH- citation you wrote for them`,
+  );
+  return EXIT.OK;
 }
 
 function publishCmd(root: string, argv: readonly string[], log: (s: string) => void): number {

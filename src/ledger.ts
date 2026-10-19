@@ -140,3 +140,139 @@ export function key(b: Behaviour): string {
 export function testKey(b: Behaviour): string {
   return `${b.suite}/${b.id}`;
 }
+
+/** Numbers held by more than one behaviour, each with every key holding it. */
+export function duplicateNumbers(items: readonly Behaviour[]): Map<number, string[]> {
+  const holders = new Map<number, string[]>();
+  for (const b of items) {
+    if (typeof b.num !== 'number' || b.num <= 0) continue;
+    const list = holders.get(b.num) ?? [];
+    list.push(key(b));
+    holders.set(b.num, list);
+  }
+  for (const [n, keys] of [...holders]) if (keys.length < 2) holders.delete(n);
+  return holders;
+}
+
+/**
+ * The high-water mark in a counter file. Every integer line counts and the
+ * largest wins, so a file still holding a merge conflict — `<<<<<<<`, both
+ * sides' numbers, `>>>>>>>` — reads as the larger side instead of as zero.
+ */
+export function parseCounter(text: string): number {
+  let best = 0;
+  for (const line of text.split('\n')) {
+    const t = line.trim();
+    if (!/^\d+$/.test(t)) continue;
+    const n = Number.parseInt(t, 10);
+    if (n > best) best = n;
+  }
+  return best;
+}
+
+/** Git's conflict markers, which a ledger mid-merge carries between its rows. */
+export function isConflictMarker(line: string): boolean {
+  return /^(<{7}|={7}|>{7}|\|{7})( |$)/.test(line);
+}
+
+export interface Renumbered {
+  readonly numbered: Behaviour[];
+  readonly highWater: number;
+  /** Every number that changed, so the author can fix a citation they wrote. */
+  readonly moved: readonly { readonly key: string; readonly from: number; readonly to: number }[];
+}
+
+/**
+ * Make a branch's numbers safe to merge onto `base`.
+ *
+ * A number is only permanent once it is on the base branch. Until then a
+ * branch's new behaviours hold PROVISIONAL numbers, taken from whatever the
+ * counter said when the branch last collected — and two open branches take the
+ * same ones. This is the step that settles them, run after merging the base in:
+ *
+ * - a behaviour the base already has gets the base's number back, always;
+ * - a new behaviour keeps its number when that number is past the base's
+ *   high-water mark and no other new behaviour holds it;
+ * - every other new behaviour moves, in its existing order, past both.
+ *
+ * Only the colliding rows move, so a citation already written for one that
+ * did not collide stays true, and running this twice changes nothing.
+ *
+ * A number the base itself holds twice is settled too: the first holder in key
+ * order keeps it and the rest move with the new block. Base history cannot say
+ * which came first, so that choice is arbitrary; pass an older `base` that
+ * predates the duplicate to settle it by history instead.
+ */
+export function renumber(
+  base: readonly Behaviour[],
+  baseHighWater: number,
+  head: readonly Behaviour[],
+  headHighWater: number,
+): Renumbered {
+  const baseNum = new Map<string, number>();
+  const claimed = new Set<number>();
+  for (const b of [...base].sort(byKey)) {
+    if (typeof b.num !== 'number' || b.num <= 0 || claimed.has(b.num)) continue;
+    baseNum.set(key(b), b.num);
+    claimed.add(b.num);
+  }
+  const ceiling = Math.max(baseHighWater, ...[...base].map((b) => (typeof b.num === 'number' ? b.num : 0)), 0);
+
+  const kept: Behaviour[] = [];
+  const fresh: Behaviour[] = [];
+  for (const b of head) {
+    const n = baseNum.get(key(b));
+    if (n !== undefined) kept.push(b.num === n ? b : { ...b, num: n });
+    else fresh.push(b);
+  }
+
+  // Existing order, so the rows that do move keep the sequence they were
+  // written in; key order breaks ties so two runs agree.
+  const ordered = [...fresh].sort((a, b) => {
+    const an = typeof a.num === 'number' && a.num > 0 ? a.num : Infinity;
+    const bn = typeof b.num === 'number' && b.num > 0 ? b.num : Infinity;
+    return an !== bn ? an - bn : byKey(a, b);
+  });
+  const taken = new Set<number>();
+  const stays: Behaviour[] = [];
+  const moves: Behaviour[] = [];
+  for (const b of ordered) {
+    if (typeof b.num === 'number' && Number.isFinite(b.num) && b.num > ceiling && !taken.has(b.num)) {
+      taken.add(b.num);
+      stays.push(b);
+    } else {
+      moves.push(b);
+    }
+  }
+  let next = Math.max(ceiling, headHighWater, ...stays.map((b) => b.num));
+  const numbered = [...kept, ...stays, ...moves.map((b) => ({ ...b, num: (next += 1) }))];
+  const highWater = next;
+
+  const before = new Map(head.map((b) => [key(b), b.num]));
+  const moved = numbered
+    .filter((b) => before.get(key(b)) !== b.num)
+    .map((b) => ({ key: key(b), from: before.get(key(b)) ?? 0, to: b.num }))
+    .sort((a, b) => a.to - b.to);
+  return { numbered, highWater, moved };
+}
+
+/**
+ * Keep the committed rows of every suite that declared nothing this run.
+ *
+ * A suite that cannot start on this machine — a sanitizer that will not
+ * initialise, a missing toolchain — declares nothing, and writing the ledger
+ * from that run would delete every claim it makes. Its rows are carried as
+ * they were committed; the run says nothing new about them.
+ */
+export function carryForward(
+  committed: readonly Behaviour[],
+  collected: readonly Behaviour[],
+  silentSuites: readonly string[],
+): Behaviour[] {
+  const silent = new Set(silentSuites);
+  return [...collected, ...committed.filter((b) => silent.has(b.suite))];
+}
+
+function byKey(a: Behaviour, b: Behaviour): number {
+  return key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0;
+}
