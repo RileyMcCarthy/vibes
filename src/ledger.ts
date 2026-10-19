@@ -198,10 +198,11 @@ export interface Renumbered {
  * Only the colliding rows move, so a citation already written for one that
  * did not collide stays true, and running this twice changes nothing.
  *
- * A number the base itself holds twice is settled too: the first holder in key
- * order keeps it and the rest move with the new block. Base history cannot say
- * which came first, so that choice is arbitrary; pass an older `base` that
- * predates the duplicate to settle it by history instead.
+ * A number the base itself holds twice is settled too: the holder this branch
+ * still has at that number keeps it, else the first in key order, and the rest
+ * move. The base cannot say which came first; pass an older `base` that
+ * predates the duplicate to settle it by history, and the result then also
+ * checks clean against the base that still has the duplicate.
  */
 export function renumber(
   base: readonly Behaviour[],
@@ -211,7 +212,11 @@ export function renumber(
 ): Renumbered {
   const baseNum = new Map<string, number>();
   const claimed = new Set<number>();
-  for (const b of [...base].sort(byKey)) {
+  // Where the base holds a number twice, the holder the branch already keeps
+  // at that number wins, so a branch that settled the duplicate stays settled.
+  const headNum = new Map(head.map((b) => [key(b), b.num]));
+  const keepsItsNumber = (b: Behaviour): number => (headNum.get(key(b)) === b.num ? 0 : 1);
+  for (const b of [...base].sort((x, y) => keepsItsNumber(x) - keepsItsNumber(y) || byKey(x, y))) {
     if (typeof b.num !== 'number' || b.num <= 0 || claimed.has(b.num)) continue;
     baseNum.set(key(b), b.num);
     claimed.add(b.num);

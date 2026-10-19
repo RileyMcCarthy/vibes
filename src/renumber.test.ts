@@ -109,6 +109,15 @@ describe('settling a branch against its base', () => {
     expect(nums(r.numbered)).toEqual({ 'firmware/alpha/holds': 9, 'firmware/beta/holds': 7, 'firmware/gamma/holds': 8 });
   });
 
+  it('accepts a branch that already settled the base\'s duplicate the other way', () => {
+    const base = [b('alpha', 7), b('beta', 7), b('gamma', 8)];
+    // Settled by history: beta keeps 7, alpha moved to 9.
+    const head = [b('alpha', 9), b('beta', 7), b('gamma', 8)];
+    const r = renumber(base, 8, head, 9);
+    expect(r.moved).toEqual([]);
+    expect(r.highWater).toBe(9);
+  });
+
   it('keeps two suites that share a test id apart', () => {
     const base = [b('same', 5)];
     const head = [b('same', 5), b('same', 5, { suite: 'control' })];
