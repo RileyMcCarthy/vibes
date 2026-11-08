@@ -217,6 +217,48 @@ describe('a report from suites something else already ran', () => {
     expect(out).toContain('_0 behaviours unchanged and holding._');
   });
 
+  it('reads a run that did not finish test by test: one failing test stopped holding, the rest hold', async () => {
+    const { dir, commit } = repo();
+    const a = declared('test_a', 'the first claim holds');
+    const b = declared('test_b', 'the second claim holds');
+    tripwire(dir);
+    writeFileSync(join(dir, 'behaviours.jsonl'), ledger([a, b]));
+    const base = commit('base');
+    const from = mkdtempSync(join(tmpdir(), 'vibes-from-'));
+    inputs(from, 'unit', [a, b], 't.c:1:test_a:PASS\nt.c:2:test_b:FAIL\n');
+    writeFileSync(join(from, 'unit', 'incomplete'), '');
+
+    const { code, out } = await run(dir, ['report', '--base', base, '--from', from, '--diff-dir', '']);
+    expect(code).toBe(0);
+    expect(out).toContain('# 1 behaviour stopped holding.');
+    expect(out).toContain('_Did not finish: `unit`');
+    expect(out).toContain('_1 behaviour unchanged and holding._');
+    expect(out).not.toContain('without a verdict');
+  });
+
+  it('gives what a run that did not finish never reached no verdict, never a removal', async () => {
+    const { dir, commit } = repo();
+    const a = declared('test_a', 'the first claim holds');
+    const b = declared('test_b', 'the second claim holds');
+    const c = declared('test_c', 'the third claim holds');
+    tripwire(dir);
+    writeFileSync(join(dir, 'behaviours.jsonl'), ledger([a, b, c]));
+    const base = commit('base');
+    const from = mkdtempSync(join(tmpdir(), 'vibes-from-'));
+    // test_c never started; test_b started and its result was never printed.
+    inputs(from, 'unit', [a, b], 't.c:1:test_a:PASS\n');
+    writeFileSync(join(from, 'unit', 'incomplete'), '');
+
+    const { code, out } = await run(dir, ['report', '--base', base, '--from', from, '--diff-dir', '']);
+    expect(code).toBe(3);
+    expect(out).toContain('# 2 behaviours without a verdict');
+    expect(out).toContain('the second claim holds');
+    expect(out).toContain('the third claim holds');
+    expect(out).not.toContain('No longer claimed');
+    expect(out).not.toContain('Stopped holding');
+    expect(out).toContain('_1 behaviour unchanged and holding._');
+  });
+
   it('refuses a directory that does not exist rather than reporting that nothing ran', async () => {
     const { dir, commit } = repo();
     tripwire(dir);

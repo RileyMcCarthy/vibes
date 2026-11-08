@@ -45,10 +45,13 @@ export interface LedgerDiff {
   /** In the current ledger and not passing, regardless of the base. Includes
    *  `did-not-report`, which is NOT a pass and must never be counted as one. */
   readonly notHolding: readonly Behaviour[];
-  /** In the base ledger, absent now, but their whole SUITE declared nothing
-   *  this run. These have no verdict — the suite failed to produce one — and
-   *  rendering them as `removed` would report a build failure as "this PR
-   *  deleted N behaviours", which is the worst misreport available. */
+  /** No verdict this run, for a behaviour the base has. Either it is absent
+   *  and its suite's run cannot say so — the suite declared nothing, or its
+   *  run did not finish — or its test declared it and then reported nothing
+   *  (`did-not-report`). Rendering the first as `removed` would report a
+   *  build failure as "this PR deleted N behaviours", which is the worst
+   *  misreport available; rendering the second as stopped holding claims a
+   *  verdict the run never gave. */
   readonly unreported: readonly Behaviour[];
 }
 
@@ -58,10 +61,16 @@ export interface LedgerDiff {
 const FIELDS = ['given', 'then', 'covers', 'why'] as const;
 const CLAIM_FIELDS = ['then', 'given'] as const;
 
+/**
+ * `noVerdictSuites` are suites whose ABSENT rows say nothing: they declared
+ * nothing this run, or their run is known not to have finished. A behaviour of
+ * theirs that is missing has no verdict, where any other suite's missing
+ * behaviour is removed.
+ */
 export function diffLedgers(
   before: readonly Behaviour[],
   after: readonly Behaviour[],
-  silentSuites: readonly string[] = [],
+  noVerdictSuites: readonly string[] = [],
 ): LedgerDiff {
   const b = new Map(before.map((x) => [key(x), x]));
   const a = new Map(after.map((x) => [key(x), x]));
@@ -71,6 +80,7 @@ export function diffLedgers(
   const respecified: Respecified[] = [];
   const broken: StatusChange[] = [];
   const fixed: StatusChange[] = [];
+  const unreported: Behaviour[] = [];
   let unchanged = 0;
 
   for (const [k, cur] of a) {
@@ -83,6 +93,12 @@ export function diffLedgers(
     const claimChanged = CLAIM_FIELDS.some((f) => fields.includes(f));
     if (claimChanged) respecified.push({ before: prev, after: cur, fields });
 
+    // Declared, then silent: the test started and nothing reported how it
+    // ended — a crash, or a run stopped before its result was printed.
+    if (cur.status === 'did-not-report') {
+      unreported.push(cur);
+      continue;
+    }
     const wasPassing = prev.status === 'pass';
     const isPassing = cur.status === 'pass';
     if (wasPassing && !isPassing) broken.push({ before: prev.status, after: cur });
@@ -90,11 +106,10 @@ export function diffLedgers(
     else if (isPassing && !claimChanged) unchanged += 1;
   }
 
-  const silent = new Set(silentSuites);
-  const unreported: Behaviour[] = [];
+  const silent = new Set(noVerdictSuites);
   for (const [k, prev] of b) {
     if (a.has(k)) continue;
-    // Absence means "removed" only when the suite actually spoke this run.
+    // Absence means "removed" only when the suite's whole run spoke.
     if (silent.has(prev.suite)) unreported.push(prev);
     else removed.push(prev);
   }

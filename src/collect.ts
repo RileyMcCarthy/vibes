@@ -37,6 +37,10 @@ export interface CollectResult {
    *  did not run for this change. Not a problem and not a verdict — the
    *  caller carries their rows from the base. Always empty for `collect`. */
   readonly notRunSuites: readonly string[];
+  /** Suites whose run is known not to have finished, under `collectFrom`:
+   *  every row they did report has its verdict, and a row they did not reach
+   *  has none — it is not removed. Always empty for `collect`. */
+  readonly incompleteSuites: readonly string[];
 }
 
 /** One suite's run: the declarations its binding wrote, and the runner's
@@ -44,6 +48,7 @@ export interface CollectResult {
 interface SuiteOutput {
   readonly declared: readonly string[];
   readonly resultText: string;
+  readonly incomplete?: boolean;
 }
 
 type Adapter = (text: string) => Map<string, Status>;
@@ -155,6 +160,9 @@ export function collect(repoRoot: string, log: (s: string) => void): CollectResu
 /** Where `collectFrom` reads one suite's run, under the inputs directory. */
 export const INPUT_DECLARED = 'behaviours.jsonl';
 export const INPUT_RESULTS = 'results.out';
+/** Present when the run stopped early: what it reported stands, what it did
+ *  not reach has no verdict. */
+export const INPUT_INCOMPLETE = 'incomplete';
 
 /**
  * Build the ledger from suites something else already ran — usually the CI
@@ -165,9 +173,14 @@ export const INPUT_RESULTS = 'results.out';
  * runner output its `results` adapter reads. A suite with no directory there
  * did not run for this change and is reported in `notRunSuites`. A directory
  * whose declarations are missing or empty is a suite that ran and said
- * nothing — silent, exactly as a command that declared nothing — so whoever
- * prepares the inputs makes a run that did not finish an empty directory, and
- * its behaviours read as having no verdict rather than as removed.
+ * nothing — silent, exactly as a command that declared nothing — so its
+ * behaviours have no verdict rather than being removed.
+ *
+ * A run that stopped early but left its files — a job that failed after its
+ * tests ran, a test binary that aborted the rest — is read as it is, with an
+ * `incomplete` file beside them. Each test it reported keeps its verdict, so
+ * one failing test reads as one behaviour that stopped holding; a behaviour
+ * the run never reached has no verdict, never a removal.
  */
 export function collectFrom(repoRoot: string, inputs: string): CollectResult {
   return collectWith(repoRoot, (suite) => {
@@ -177,6 +190,7 @@ export function collectFrom(repoRoot: string, inputs: string): CollectResult {
     return {
       declared: readDeclared(join(dir, INPUT_DECLARED)),
       resultText: existsSync(results) ? readFileSync(results, 'utf8') : '',
+      incomplete: existsSync(join(dir, INPUT_INCOMPLETE)),
     };
   });
 }
@@ -194,6 +208,7 @@ function collectWith(
   const silentSuites: string[] = [];
   const unreadableSuites: string[] = [];
   const notRunSuites: string[] = [];
+  const incompleteSuites: string[] = [];
   const suiteFiles = findSuites(repoRoot);
 
   for (const rel of suiteFiles) {
@@ -227,6 +242,7 @@ function collectWith(
       continue;
     }
     const { declared, resultText } = output;
+    if (output.incomplete === true) incompleteSuites.push(suite.name);
 
     let status: Map<string, Status>;
     try {
@@ -277,5 +293,13 @@ function collectWith(
     }
   }
 
-  return { behaviours, problems, suitesRun: suiteFiles.length, silentSuites, unreadableSuites, notRunSuites };
+  return {
+    behaviours,
+    problems,
+    suitesRun: suiteFiles.length,
+    silentSuites,
+    unreadableSuites,
+    notRunSuites,
+    incompleteSuites,
+  };
 }

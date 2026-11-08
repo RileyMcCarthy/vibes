@@ -42,9 +42,10 @@ node bin/vibes.mjs publish --dir vibes-images --ref vibes-images --into "$HEAD"
 node bin/vibes.mjs post --file vibes-report.md --repo owner/repo --pr "$PR"
 ```
 
-Exit codes: `0` ok, `2` usage, `3` a suite could not run, `4` a claim needs
-rewriting. A behaviour that **stopped holding** or was **removed** leads the
-report but does not fail it: the failing test already fails its own suite, and
+Exit codes: `0` ok, `2` usage, `3` a behaviour has no verdict (a suite could not
+run or did not finish, or a test never reported), `4` a claim needs rewriting.
+A behaviour that **stopped holding** or was **removed** leads the report but
+does not fail it: the failing test already fails its own suite, and
 a removal is usually the point of the change. Failing on either made the job
 red on correct pull requests, and a check that is red on correct work stops
 being read. `1` and `5` are retired and not reused.
@@ -71,11 +72,16 @@ node bin/vibes.mjs report --base origin/main --from "$RUNNER_TEMP/vibes"
 
 A suite with **no directory** was not run for this change — its job was skipped
 because nothing it tests changed. Its rows are carried from the base as they
-were, and the report names it in one line under the headline. A suite whose
-job **failed or was cancelled** should get an **empty** directory: it then reads
-as having no verdict (exit `3`), never as removed and never as holding, however
-much of it ran before it stopped. Deciding which is which is the workflow's
-job — it knows each job's result; Vibes only sees the directories.
+were, and the report names it in one line under the headline.
+
+A suite whose job **failed after its tests ran** keeps its files, plus an empty
+file named `incomplete`. Every test it reported keeps its verdict, so one
+failing test reads as one behaviour that **stopped holding** while the rest
+hold; a behaviour the run never reached, or whose test never printed a result,
+has **no verdict** (exit `3`) — never a removal. A suite whose job left nothing
+(cancelled, or failed before its tests) gets an **empty** directory, and all of
+it has no verdict. Deciding which is which is the workflow's job — it knows each
+job's result; Vibes only sees the directories.
 
 ## Two branches at once
 

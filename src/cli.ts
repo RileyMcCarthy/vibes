@@ -12,7 +12,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { postComment } from './comment.js';
-import { collect, collectFrom, INPUT_DECLARED, INPUT_RESULTS } from './collect.js';
+import { collect, collectFrom, INPUT_DECLARED, INPUT_INCOMPLETE, INPUT_RESULTS } from './collect.js';
 import { diffLedgers, isQuiet } from './diff.js';
 import { diffBase, loadPictures, renderPictureSection, resolveSha, writeGallery, type PictureView } from './images.js';
 import { carryForward, parseLedger, serializeLedger, type Behaviour } from './ledger.js';
@@ -136,7 +136,9 @@ export async function main(argv: readonly string[]): Promise<number> {
         '  vibes report --base REF --from DIR\n' +
         '                              ... from suites already run: DIR/<suite>/' + INPUT_DECLARED + ' and\n' +
         '                              DIR/<suite>/' + INPUT_RESULTS + '; runs no command. A suite with no\n' +
-        '                              directory was not run, and keeps its rows from REF\n' +
+        '                              directory was not run, and keeps its rows from REF; one\n' +
+        '                              holding a file named ' + INPUT_INCOMPLETE + ' stopped early, and what it did\n' +
+        '                              not reach has no verdict\n' +
         '  vibes preview --given G --then T [--then T2] [--why W] [--covers C]\n' +
         '                              render a claim you are writing, and lint it\n' +
         '  vibes preview [--id X] [--suite S] [--file F]\n' +
@@ -157,7 +159,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         'preview and lint run NO suites — they read what is committed, or what you type.\n' +
         'With ' + CAPABILITIES_FILE + ' at the repo root, report and preview group every claim under\n' +
         'the capability its id area belongs to, and lint refuses an area with none.\n\n' +
-        'Exit: 0 ok · 2 usage · 3 a suite could not run · 4 a claim needs rewriting\n' +
+        'Exit: 0 ok · 2 usage · 3 a behaviour has no verdict · 4 a claim needs rewriting\n' +
         'A behaviour that broke or was removed is reported, not failed on: the broken\n' +
         'test already fails its own suite, and a removal is usually the change.\n',
     );
@@ -287,12 +289,16 @@ export async function main(argv: readonly string[]): Promise<number> {
     return EXIT.COLLECT;
   }
   for (const s of r.notRunSuites) log(`vibes: ${s} was not run for this change — its behaviours are carried from ${base}`);
+  for (const s of r.incompleteSuites) log(`vibes: ${s} did not finish — what it did not reach has no verdict`);
 
   // A suite that did not run for this change says nothing new about its
   // behaviours, so they stand as the base has them: not removed, and not
   // re-judged.
   const baseLedger = ledgerAt(root, base);
-  const d = diffLedgers(baseLedger, carryForward(baseLedger, r.behaviours, r.notRunSuites), r.silentSuites);
+  const d = diffLedgers(baseLedger, carryForward(baseLedger, r.behaviours, r.notRunSuites), [
+    ...r.silentSuites,
+    ...r.incompleteSuites,
+  ]);
 
   const view = pictureView(root, argv, base, log);
   const images = loadPictures(root, base);
@@ -309,6 +315,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   const render = (maxNew?: number): string =>
     renderMarkdown(d, {
       notRun: r.notRunSuites,
+      incomplete: r.incompleteSuites,
       ...(maxNew === undefined ? {} : { maxNew }),
       ...(caps === undefined ? {} : { capabilities: caps }),
     });
@@ -327,7 +334,11 @@ export async function main(argv: readonly string[]): Promise<number> {
   // so say so — but do not fail on it, because a PR that adds behaviour will
   // legitimately differ until the author runs `collect --write`.
   const committed = join(root, LEDGER);
-  const expected = serializeLedger(carryForward(committedLedger(root), r.behaviours, r.notRunSuites));
+  // A suite that did not run, or did not finish, cannot say the committed
+  // ledger is stale; only the suites whose whole run is here are judged.
+  const unjudged = [...r.notRunSuites, ...r.incompleteSuites];
+  const judged = r.behaviours.filter((b) => !unjudged.includes(b.suite));
+  const expected = serializeLedger(carryForward(committedLedger(root), judged, unjudged));
   if (existsSync(committed) && readFileSync(committed, 'utf8') !== expected) {
     log(`vibes: ${LEDGER} is out of date — run \`vibes collect --write\` and commit it`);
   }
