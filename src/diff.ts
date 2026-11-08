@@ -114,11 +114,6 @@ export function diffLedgers(
   };
 }
 
-/** True when a behaviour broke or is no longer claimed. */
-export function hasRegression(d: LedgerDiff): boolean {
-  return d.broken.length > 0 || d.removed.length > 0;
-}
-
 /** Nothing in the ledger changed and nothing is failing, so another section
  *  of the report — pictures, for example — can lead. */
 export function isQuiet(d: LedgerDiff): boolean {

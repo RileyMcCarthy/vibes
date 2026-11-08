@@ -71,7 +71,6 @@ export function previewLedger(items: readonly Behaviour[], filter: PreviewFilter
 export function previewInline(c: InlineClaim): string {
   const group: Behaviour[] = c.expectations.map((e, i) => ({
     v: 2,
-    num: 0,
     id: 'preview',
     expect: `e${String(i)}`,
     suite: '',
@@ -104,9 +103,8 @@ export function formatFindings(findings: readonly (Finding | LedgerFinding)[]): 
     .sort((a, b) => order(a) - order(b))
     .map((f) => {
       const where = 'key' in f ? `${f.file === '' ? '(uncollected)' : f.file} · ${f.key}` : '';
-      const cite = 'num' in f && f.num > 0 ? ` BH-${String(f.num)}` : '';
       const head = `${f.severity === 'error' ? 'error' : 'warn '} ${f.rule} [${f.field}]`;
-      return where === '' ? `${head}: ${f.message}` : `${head} ${where}${cite}\n        ${f.message}`;
+      return where === '' ? `${head}: ${f.message}` : `${head} ${where}\n        ${f.message}`;
     })
     .join('\n');
 }

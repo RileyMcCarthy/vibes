@@ -7,7 +7,7 @@
  * reads as "green" to someone skimming, which is how a report stops being read.
  */
 
-import { handle, key, testKey, type Behaviour } from './ledger.js';
+import { key, testKey, type Behaviour } from './ledger.js';
 import type { LedgerDiff, Respecified } from './diff.js';
 import { groupByCapability, type CapabilityMap } from './capabilities.js';
 
@@ -68,9 +68,8 @@ export function oneTest(group: readonly Behaviour[], withFile = true, notes: Row
   // expectation ended and the next began, or which half was the condition.
   const lines = [`- **When** ${first.given}`, ...(notes.scene ?? [])];
   for (const b of group) {
-    const h = handle(b);
     const n = notes.expectation?.(b) ?? {};
-    lines.push(`  - ${b.then}${h === '' ? '' : ` \`${h}\``}`, ...(n.afterThen ?? []));
+    lines.push(`  - ${b.then}`, ...(n.afterThen ?? []));
     if (b.why !== undefined) lines.push(`    <sub>${b.why}</sub>`);
     lines.push(...(n.afterWhy ?? []));
   }
@@ -250,7 +249,7 @@ export function renderMarkdown(d: LedgerDiff, opts: RenderOptions = {}): string 
       '',
     );
     section(d.broken, (s) => s.after, (items) =>
-      items.map((s) => `- **When** ${s.after.given}\n  - ${s.after.then} \`${handle(s.after)}\`\n  <sub>was ${s.before}, now ${s.after.status} · \`${s.after.file}\`</sub>`),
+      items.map((s) => `- **When** ${s.after.given}\n  - ${s.after.then}\n  <sub>was ${s.before}, now ${s.after.status} · \`${s.after.file}\`</sub>`),
     );
     out.push('');
   }
@@ -262,7 +261,7 @@ export function renderMarkdown(d: LedgerDiff, opts: RenderOptions = {}): string 
       '',
     );
     section(d.unreported, (b) => b, (items) =>
-      items.map((b) => `- **When** ${b.given}\n  - ${b.then} \`${handle(b)}\`\n  <sub>suite \`${b.suite}\` · \`${b.file}\`</sub>`),
+      items.map((b) => `- **When** ${b.given}\n  - ${b.then}\n  <sub>suite \`${b.suite}\` · \`${b.file}\`</sub>`),
     );
     out.push('');
   }
@@ -271,7 +270,7 @@ export function renderMarkdown(d: LedgerDiff, opts: RenderOptions = {}): string 
     out.push('## No longer claimed', '');
     out.push('Nothing in the repo asserts these any more.', '');
     section(d.removed, (b) => b, (items) =>
-      items.map((b) => `- **When** ${b.given}\n  - ${b.then} \`${handle(b)}\`\n  <sub>was in \`${b.file}\`</sub>`),
+      items.map((b) => `- **When** ${b.given}\n  - ${b.then}\n  <sub>was in \`${b.file}\`</sub>`),
     );
     out.push('');
   }

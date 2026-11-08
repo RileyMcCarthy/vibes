@@ -12,13 +12,11 @@ function row(over: {
   covers?: string;
   file?: string;
   test?: string;
-  num?: number;
   expect?: string;
   status?: Behaviour['status'];
 }): Behaviour {
   const b: Behaviour = {
     v: 2,
-    num: over.num ?? 1,
     id: over.id,
     expect: over.expect ?? 'holds',
     suite: 'control',
@@ -92,7 +90,7 @@ describe('a respecification is a changed claim', () => {
     // so a reader judges it the same way. What it replaced sits under it.
     expect(md).toContain(
       '- **When** a situation\n' +
-        '  - a relative move is not offset by the gauge length, because it states a distance to travel `BH-1`\n' +
+        '  - a relative move is not offset by the gauge length, because it states a distance to travel\n' +
         '    <sub>was: a relative move is not offset by the gauge length, because it is a distance rather than a destination</sub>\n' +
         '    <sub>new reason</sub>\n' +
         '    <sub>was, because: old reason</sub>',
@@ -123,24 +121,24 @@ describe('a respecification is a changed claim', () => {
     expect(d.respecified).toHaveLength(1);
     expect(d.respecified[0]?.fields).toEqual(['given']);
     const md = renderMarkdown(d);
-    expect(md).toContain('- **When** new scene\n  <sub>was: old scene</sub>\n  - the machine stays disabled `BH-1`');
+    expect(md).toContain('- **When** new scene\n  <sub>was: old scene</sub>\n  - the machine stays disabled\n');
   });
 
   it('prints one scene for two expectations reworded under it', () => {
     const before = [
       row({ id: 'a', expect: 'x', then: 'old x', given: 'old scene' }),
-      row({ id: 'a', expect: 'y', then: 'old y', given: 'old scene', num: 2 }),
+      row({ id: 'a', expect: 'y', then: 'old y', given: 'old scene' }),
     ];
     const after = [
       row({ id: 'a', expect: 'x', then: 'new x', given: 'new scene' }),
-      row({ id: 'a', expect: 'y', then: 'new y', given: 'new scene', num: 2 }),
+      row({ id: 'a', expect: 'y', then: 'new y', given: 'new scene' }),
     ];
     const md = renderMarkdown(diffLedgers(before, after));
     const section = md.slice(md.indexOf('## Respecified'));
     expect(section.match(/\*\*When\*\*/g)).toHaveLength(1);
     expect(section.match(/<sub>was: old scene<\/sub>/g)).toHaveLength(1);
-    expect(section).toContain('  - new x `BH-1`\n    <sub>was: old x</sub>');
-    expect(section).toContain('  - new y `BH-2`\n    <sub>was: old y</sub>');
+    expect(section).toContain('  - new x\n    <sub>was: old x</sub>');
+    expect(section).toContain('  - new y\n    <sub>was: old y</sub>');
   });
 
   it('does not print the claim twice when the test is named after it', () => {
@@ -165,18 +163,18 @@ describe('a respecification is a changed claim', () => {
     expect(md).toContain('`test_core_stops`');
   });
 
-  it('shows no handle for a behaviour removed against a pre-numbering ledger', () => {
-    // main's ledger predates numbering, so its rows carry no num at all.
-    const legacy = { ...row({ id: 'old.claim', then: 'a claim from before numbering' }), num: undefined as unknown as number };
-    const md = renderMarkdown(diffLedgers([legacy], [], []));
-    expect(md).toContain('a claim from before numbering');
-    expect(md).not.toContain('BH-undefined');
-    expect(md).not.toContain('BH-NaN');
-  });
-
-  it('cites a numbered behaviour on its row', () => {
-    const md = renderMarkdown(diffLedgers([], [row({ id: 'x.y', then: 'a claim', num: 42 })], []));
-    expect(md).toContain('BH-42');
+  it('shows no citation number on any row', () => {
+    const md = renderMarkdown(
+      diffLedgers(
+        [row({ id: 'gone.claim', then: 'a claim the change removed' }), row({ id: 'x.held', then: 'a claim that broke' })],
+        [row({ id: 'x.held', then: 'a claim that broke', status: 'fail' }), row({ id: 'x.y', then: 'a new claim' })],
+        [],
+      ),
+    );
+    expect(md).toContain('a claim the change removed');
+    expect(md).toContain('a claim that broke');
+    expect(md).toContain('a new claim');
+    expect(md).not.toContain('BH-');
   });
 });
 
@@ -209,7 +207,7 @@ describe('a report with a capability map', () => {
     const md = renderMarkdown(
       diffLedgers(
         [row({ id: 'monitor.old', then: 'old claim' })],
-        [row({ id: 'monitor.old', then: 'new claim' }), row({ id: 'motion.new', then: 'a move', num: 2 })],
+        [row({ id: 'monitor.old', then: 'new claim' }), row({ id: 'motion.new', then: 'a move' })],
       ),
       { capabilities: caps },
     );
@@ -221,8 +219,8 @@ describe('a report with a capability map', () => {
   it('heads each section with the capability and prints its paragraph once', () => {
     const md = renderMarkdown(
       diffLedgers(
-        [row({ id: 'monitor.a', then: 'old', num: 1 }), row({ id: 'monitor.b', then: 'gone', num: 2 })],
-        [row({ id: 'monitor.a', then: 'new', num: 1 }), row({ id: 'monitor.c', then: 'added', num: 3 })],
+        [row({ id: 'monitor.a', then: 'old' }), row({ id: 'monitor.b', then: 'gone' })],
+        [row({ id: 'monitor.a', then: 'new' }), row({ id: 'monitor.c', then: 'added' })],
       ),
       { capabilities: caps },
     );
