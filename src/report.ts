@@ -172,6 +172,10 @@ export interface RenderOptions {
    *  them, each paragraph is printed once, and the report leads with
    *  capability-level change. Without one, rows group by suite and file. */
   readonly capabilities?: CapabilityMap;
+  /** Suites that did not run for this change, whose rows stand as the base
+   *  has them. Named once, under the headline, so a short report about a
+   *  change that ran one suite is not read as a verdict on the others. */
+  readonly notRun?: readonly string[];
 }
 
 /* Where a reader starts when there is a map: which capabilities this change
@@ -216,7 +220,13 @@ export function combineReports(body: string, extra: string, lead: boolean): stri
 }
 
 export function renderMarkdown(d: LedgerDiff, opts: RenderOptions = {}): string {
-  const out: string[] = [`# ${headline(d)}`, '', ...summary(d)];
+  const out: string[] = [`# ${headline(d)}`, ''];
+  const notRun = opts.notRun ?? [];
+  if (notRun.length > 0) {
+    const names = notRun.map((s) => `\`${s}\``).join(', ');
+    out.push(`_Not run for this change: ${names} — ${notRun.length === 1 ? 'its' : 'their'} behaviours are carried from the base as they were._`, '');
+  }
+  out.push(...summary(d));
   const caps = opts.capabilities;
   if (caps !== undefined) out.push(...byCapabilityTable(caps, d));
 

@@ -10,9 +10,9 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { postComment } from './comment.js';
-import { collect } from './collect.js';
+import { collect, collectFrom, INPUT_DECLARED, INPUT_RESULTS } from './collect.js';
 import { diffLedgers, isQuiet } from './diff.js';
 import { diffBase, loadPictures, renderPictureSection, resolveSha, writeGallery, type PictureView } from './images.js';
 import { carryForward, parseLedger, serializeLedger, type Behaviour } from './ledger.js';
@@ -133,6 +133,10 @@ export async function main(argv: readonly string[]): Promise<number> {
       'vibes — what behaviour does this change add, and what stopped holding?\n\n' +
         '  vibes collect [--write]     run every suite; --write updates ' + LEDGER + '\n' +
         '  vibes report --base REF     diff against REF and render markdown\n' +
+        '  vibes report --base REF --from DIR\n' +
+        '                              ... from suites already run: DIR/<suite>/' + INPUT_DECLARED + ' and\n' +
+        '                              DIR/<suite>/' + INPUT_RESULTS + '; runs no command. A suite with no\n' +
+        '                              directory was not run, and keeps its rows from REF\n' +
         '  vibes preview --given G --then T [--then T2] [--why W] [--covers C]\n' +
         '                              render a claim you are writing, and lint it\n' +
         '  vibes preview [--id X] [--suite S] [--file F]\n' +
@@ -267,11 +271,28 @@ export async function main(argv: readonly string[]): Promise<number> {
     return EXIT.USAGE;
   }
 
-  const r = collect(root, log);
+  const from = flag(argv, 'from');
+  if (from !== undefined && (from === '' || !existsSync(resolve(from)))) {
+    // A mistyped directory would otherwise read as "no suite ran", which is a
+    // clean report about nothing.
+    process.stderr.write(`vibes report: --from ${from === '' ? 'needs a directory' : `${from} does not exist`}\n`);
+    return EXIT.USAGE;
+  }
+  const r = from === undefined ? collect(root, log) : collectFrom(root, resolve(from));
   for (const p of r.problems) log(`vibes: ${p}`);
-  if (r.behaviours.length === 0 && r.problems.length > 0) return EXIT.COLLECT;
+  // Nothing to render only when no suite could even be named. A suite that
+  // said nothing still gets a report — its behaviours, without a verdict — and
+  // that is the report a reviewer needs when the one suite a change ran broke.
+  if (r.behaviours.length === 0 && r.silentSuites.length === 0 && r.notRunSuites.length === 0 && r.problems.length > 0) {
+    return EXIT.COLLECT;
+  }
+  for (const s of r.notRunSuites) log(`vibes: ${s} was not run for this change — its behaviours are carried from ${base}`);
 
-  const d = diffLedgers(ledgerAt(root, base), r.behaviours, r.silentSuites);
+  // A suite that did not run for this change says nothing new about its
+  // behaviours, so they stand as the base has them: not removed, and not
+  // re-judged.
+  const baseLedger = ledgerAt(root, base);
+  const d = diffLedgers(baseLedger, carryForward(baseLedger, r.behaviours, r.notRunSuites), r.silentSuites);
 
   const view = pictureView(root, argv, base, log);
   const images = loadPictures(root, base);
@@ -287,6 +308,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   const caps = capabilities(root, log);
   const render = (maxNew?: number): string =>
     renderMarkdown(d, {
+      notRun: r.notRunSuites,
       ...(maxNew === undefined ? {} : { maxNew }),
       ...(caps === undefined ? {} : { capabilities: caps }),
     });
@@ -305,7 +327,8 @@ export async function main(argv: readonly string[]): Promise<number> {
   // so say so — but do not fail on it, because a PR that adds behaviour will
   // legitimately differ until the author runs `collect --write`.
   const committed = join(root, LEDGER);
-  if (existsSync(committed) && readFileSync(committed, 'utf8') !== serializeLedger(r.behaviours)) {
+  const expected = serializeLedger(carryForward(committedLedger(root), r.behaviours, r.notRunSuites));
+  if (existsSync(committed) && readFileSync(committed, 'utf8') !== expected) {
     log(`vibes: ${LEDGER} is out of date — run \`vibes collect --write\` and commit it`);
   }
 

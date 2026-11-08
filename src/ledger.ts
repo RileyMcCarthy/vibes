@@ -103,7 +103,8 @@ export function testKey(b: Behaviour): string {
  * A suite that cannot start on this machine — a sanitizer that will not
  * initialise, a missing toolchain — declares nothing, and writing the ledger
  * from that run would delete every claim it makes. Its rows are carried as
- * they were committed; the run says nothing new about them.
+ * they were committed; the run says nothing new about them. A report carries
+ * a suite that was not run for the change the same way, from the base.
  */
 export function carryForward(
   committed: readonly Behaviour[],

@@ -6,7 +6,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -140,5 +140,88 @@ describe('moving a numbered ledger off numbers', () => {
     expect(written).not.toContain('"num"');
     expect(written).toContain('a claim from a suite that did not start');
     expect(written).toContain('a claim that still runs');
+  });
+});
+
+describe('a report from suites something else already ran', () => {
+  /** A ledger as `collect --write` writes it. */
+  function ledger(rows: readonly Record<string, unknown>[], suiteName = 'unit'): string {
+    return rows.map((r) => JSON.stringify({ ...r, suite: suiteName, status: 'pass' })).join('\n') + '\n';
+  }
+
+  /** The inputs a CI job leaves behind: what the binding wrote, and the runner's output. */
+  function inputs(dir: string, suiteName: string, rows: readonly Record<string, unknown>[], results: string): void {
+    mkdirSync(join(dir, suiteName), { recursive: true });
+    writeFileSync(join(dir, suiteName, 'behaviours.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    writeFileSync(join(dir, suiteName, 'results.out'), results);
+  }
+
+  /** A suite whose command must never run under --from: it leaves a mark if it does. */
+  function tripwire(dir: string): void {
+    writeFileSync(
+      join(dir, 'vibes.suite.json'),
+      JSON.stringify({ v: 1, name: 'unit', lang: 'c', cmd: 'touch command-ran; false', results: 'unity-stdout' }),
+    );
+  }
+
+  it('reads the declarations and verdicts it is given, and runs no command', async () => {
+    const { dir, commit } = repo();
+    const a = declared('test_a', 'the first claim holds');
+    const b = declared('test_b', 'the second claim holds');
+    tripwire(dir);
+    writeFileSync(join(dir, 'behaviours.jsonl'), ledger([a]));
+    const base = commit('base');
+    writeFileSync(join(dir, 'behaviours.jsonl'), ledger([a, b]));
+    commit('add b');
+    const from = mkdtempSync(join(tmpdir(), 'vibes-from-'));
+    inputs(from, 'unit', [a, b], 't.c:1:test_a:PASS\nt.c:2:test_b:PASS\n');
+
+    const { code, out } = await run(dir, ['report', '--base', base, '--from', from, '--diff-dir', '']);
+    expect(code).toBe(0);
+    expect(out).toContain('# 1 new behaviour.');
+    expect(out).toContain('the second claim holds');
+    expect(existsSync(join(dir, 'command-ran'))).toBe(false);
+  });
+
+  it('carries a suite with no input from the base, and names it once', async () => {
+    const { dir, commit } = repo();
+    const a = declared('test_a', 'the first claim holds');
+    tripwire(dir);
+    writeFileSync(join(dir, 'behaviours.jsonl'), ledger([a]));
+    const base = commit('base');
+    writeFileSync(join(dir, 'README'), 'docs only\n');
+    commit('docs');
+    const from = mkdtempSync(join(tmpdir(), 'vibes-from-'));
+
+    const { code, out } = await run(dir, ['report', '--base', base, '--from', from, '--diff-dir', '']);
+    expect(code).toBe(0);
+    expect(out).toContain('# No behaviour added, removed or respecified.');
+    expect(out).toContain('_Not run for this change: `unit` — its behaviours are carried from the base as they were._');
+    expect(out).not.toContain('No longer claimed');
+    expect(existsSync(join(dir, 'command-ran'))).toBe(false);
+  });
+
+  it('gives a suite whose run did not finish no verdict, never a removal', async () => {
+    const { dir, commit } = repo();
+    const a = declared('test_a', 'the first claim holds');
+    tripwire(dir);
+    writeFileSync(join(dir, 'behaviours.jsonl'), ledger([a]));
+    const base = commit('base');
+    const from = mkdtempSync(join(tmpdir(), 'vibes-from-'));
+    mkdirSync(join(from, 'unit'));
+
+    const { code, out } = await run(dir, ['report', '--base', base, '--from', from, '--diff-dir', '']);
+    expect(code).toBe(3);
+    expect(out).toContain('without a verdict');
+    expect(out).not.toContain('No longer claimed');
+    expect(out).toContain('_0 behaviours unchanged and holding._');
+  });
+
+  it('refuses a directory that does not exist rather than reporting that nothing ran', async () => {
+    const { dir, commit } = repo();
+    tripwire(dir);
+    const base = commit('base');
+    const { code } = await run(dir, ['report', '--base', base, '--from', join(dir, 'no-such-dir'), '--diff-dir', '']);
+    expect(code).toBe(2);
   });
 });

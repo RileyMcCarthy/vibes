@@ -33,6 +33,17 @@ export interface CollectResult {
   /** Suite files that could not be read or understood, so never ran. Their
    *  name is unknown, so their committed rows cannot be carried forward. */
   readonly unreadableSuites: readonly string[];
+  /** Suites with no input to read, under `collectFrom`: whatever runs them
+   *  did not run for this change. Not a problem and not a verdict — the
+   *  caller carries their rows from the base. Always empty for `collect`. */
+  readonly notRunSuites: readonly string[];
+}
+
+/** One suite's run: the declarations its binding wrote, and the runner's
+ *  output in the format its `results` adapter reads. */
+interface SuiteOutput {
+  readonly declared: readonly string[];
+  readonly resultText: string;
 }
 
 type Adapter = (text: string) => Map<string, Status>;
@@ -106,11 +117,83 @@ export function findSuites(repoRoot: string): readonly string[] {
     .filter((p) => p !== '');
 }
 
+/** Run every suite's own command, as a developer does locally. */
 export function collect(repoRoot: string, log: (s: string) => void): CollectResult {
+  return collectWith(repoRoot, (suite, dir) => {
+    const scratch = mkdtempSync(join(tmpdir(), 'vibes-'));
+    const ledgerPath = join(scratch, 'behaviours.jsonl');
+    const resultsPath = join(scratch, 'results.out');
+    writeFileSync(ledgerPath, '');
+
+    log(`vibes: ${suite.name}: ${suite.cmd}`);
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
+    env['VIBES_BEHAVIOURS'] = ledgerPath;
+    env['VIBES_RESULTS'] = resultsPath;
+    env['NO_COLOR'] = '1';
+
+    const run = spawnSync('/bin/sh', ['-c', suite.cmd], {
+      cwd: dir,
+      env,
+      encoding: 'utf8',
+      maxBuffer: 1 << 28,
+    });
+
+    // A non-zero exit is EXPECTED when a test fails, and those failures are the
+    // finding. Only an unreadable suite is an error.
+    const out = {
+      declared: readDeclared(ledgerPath),
+      resultText: existsSync(resultsPath)
+        ? readFileSync(resultsPath, 'utf8')
+        : `${run.stdout ?? ''}\n${run.stderr ?? ''}`,
+    };
+    rmSync(scratch, { recursive: true, force: true });
+    return out;
+  });
+}
+
+/** Where `collectFrom` reads one suite's run, under the inputs directory. */
+export const INPUT_DECLARED = 'behaviours.jsonl';
+export const INPUT_RESULTS = 'results.out';
+
+/**
+ * Build the ledger from suites something else already ran — usually the CI
+ * jobs that run the tests anyway — without running any command.
+ *
+ * Each suite's run is read from `<inputs>/<suite name>/`: `behaviours.jsonl`,
+ * the file its binding wrote to `$VIBES_BEHAVIOURS`, and `results.out`, the
+ * runner output its `results` adapter reads. A suite with no directory there
+ * did not run for this change and is reported in `notRunSuites`. A directory
+ * whose declarations are missing or empty is a suite that ran and said
+ * nothing — silent, exactly as a command that declared nothing — so whoever
+ * prepares the inputs makes a run that did not finish an empty directory, and
+ * its behaviours read as having no verdict rather than as removed.
+ */
+export function collectFrom(repoRoot: string, inputs: string): CollectResult {
+  return collectWith(repoRoot, (suite) => {
+    const dir = join(inputs, suite.name);
+    if (!existsSync(dir)) return undefined;
+    const results = join(dir, INPUT_RESULTS);
+    return {
+      declared: readDeclared(join(dir, INPUT_DECLARED)),
+      resultText: existsSync(results) ? readFileSync(results, 'utf8') : '',
+    };
+  });
+}
+
+function readDeclared(path: string): string[] {
+  return existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').filter((l) => l !== '') : [];
+}
+
+function collectWith(
+  repoRoot: string,
+  produce: (suite: Suite, dir: string) => SuiteOutput | undefined,
+): CollectResult {
   const problems: string[] = [];
   const behaviours: Behaviour[] = [];
   const silentSuites: string[] = [];
   const unreadableSuites: string[] = [];
+  const notRunSuites: string[] = [];
   const suiteFiles = findSuites(repoRoot);
 
   for (const rel of suiteFiles) {
@@ -138,34 +221,12 @@ export function collect(repoRoot: string, log: (s: string) => void): CollectResu
       continue;
     }
 
-    const scratch = mkdtempSync(join(tmpdir(), 'vibes-'));
-    const ledgerPath = join(scratch, 'behaviours.jsonl');
-    const resultsPath = join(scratch, 'results.out');
-    writeFileSync(ledgerPath, '');
-
-    log(`vibes: ${suite.name}: ${suite.cmd}`);
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
-    env['VIBES_BEHAVIOURS'] = ledgerPath;
-    env['VIBES_RESULTS'] = resultsPath;
-    env['NO_COLOR'] = '1';
-
-    const run = spawnSync('/bin/sh', ['-c', suite.cmd], {
-      cwd: dir,
-      env,
-      encoding: 'utf8',
-      maxBuffer: 1 << 28,
-    });
-
-    // A non-zero exit is EXPECTED when a test fails, and those failures are the
-    // finding. Only an unreadable suite is an error.
-    const declared = existsSync(ledgerPath)
-      ? readFileSync(ledgerPath, 'utf8').trim().split('\n').filter((l) => l !== '')
-      : [];
-
-    const resultText = existsSync(resultsPath)
-      ? readFileSync(resultsPath, 'utf8')
-      : `${run.stdout ?? ''}\n${run.stderr ?? ''}`;
+    const output = produce(suite, dir);
+    if (output === undefined) {
+      notRunSuites.push(suite.name);
+      continue;
+    }
+    const { declared, resultText } = output;
 
     let status: Map<string, Status>;
     try {
@@ -200,6 +261,10 @@ export function collect(repoRoot: string, log: (s: string) => void): CollectResu
           : relative(repoRoot, declaredFile.startsWith('/') ? declaredFile : resolve(dir, declaredFile))
               .split(sep)
               .join('/');
+      // An absolute path from a checkout somewhere else — a run collected on
+      // another machine — would land in the ledger as `../..`, and every row
+      // of that file would then read as moved.
+      if (file.startsWith('../')) problems.push(`${rel}: ${declaredFile} is outside this checkout — was the suite run in another one?`);
       const test = typeof raw['test'] === 'string' ? raw['test'] : '';
       behaviours.push({
         ...(raw as unknown as Behaviour),
@@ -210,8 +275,7 @@ export function collect(repoRoot: string, log: (s: string) => void): CollectResu
         status: status.get(test) ?? 'did-not-report',
       });
     }
-    rmSync(scratch, { recursive: true, force: true });
   }
 
-  return { behaviours, problems, suitesRun: suiteFiles.length, silentSuites, unreadableSuites };
+  return { behaviours, problems, suitesRun: suiteFiles.length, silentSuites, unreadableSuites, notRunSuites };
 }
