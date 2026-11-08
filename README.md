@@ -53,6 +53,30 @@ A suite that declares nothing on this machine — a sanitizer that will not star
 a missing toolchain — keeps its committed rows when you `collect --write`; the
 run says nothing new about them, so it does not delete them.
 
+## In CI, where the tests already run
+
+`report` runs every suite's command, which in CI repeats work the test jobs
+have just done. With `--from DIR` it runs nothing and reads each suite's run
+from `DIR/<suite name>/` instead:
+
+- `behaviours.jsonl` — the file the binding wrote; set `VIBES_BEHAVIOURS` to it
+  in the job that runs the tests.
+- `results.out` — the runner's output in the suite's `results` format (`tee`
+  the output of `pio test` or `cargo test`; give vitest a second, `json`
+  reporter writing here).
+
+```bash
+node bin/vibes.mjs report --base origin/main --from "$RUNNER_TEMP/vibes"
+```
+
+A suite with **no directory** was not run for this change — its job was skipped
+because nothing it tests changed. Its rows are carried from the base as they
+were, and the report names it in one line under the headline. A suite whose
+job **failed or was cancelled** should get an **empty** directory: it then reads
+as having no verdict (exit `3`), never as removed and never as holding, however
+much of it ran before it stopped. Deciding which is which is the workflow's
+job — it knows each job's result; Vibes only sees the directories.
+
 ## Two branches at once
 
 An expectation is identified by `suite/id/expect` and nothing else, and the
