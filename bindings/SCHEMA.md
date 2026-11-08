@@ -35,12 +35,10 @@ the test's `id`, `given`, `file` and `covers`:
 | `covers` | no       | `path#symbol` the behaviour exercises, so a reader can find the code. |
 | `why`    | no       | the standing requirement this expectation serves.                     |
 
-Vibes adds two fields the bindings never send: `status`, joined from the
-runner's own output, and `num`, a short handle (`BH-42`) for citing one
-expectation in a review or a commit message. A number is assigned the first time
-an expectation is collected and never reused, even after it is deleted, so a
-citation written a year ago still means the same claim. It is not the identity —
-`id` plus `expect` is.
+Vibes adds one field the bindings never send: `status`, joined from the
+runner's own output. Ledgers written by earlier versions also carry `num`, a
+citation number; it is ignored on read and dropped on the next write. Identity
+is `id` plus `expect`, within a suite.
 
 ## Why identity is a pair
 
@@ -61,8 +59,8 @@ the condition — the report prints them together:
 
 ```
 - given a move line with a trailing comment containing a coordinate token
-  **the target position is the one the author wrote before the comment** BH-42
-  **no parameter is taken from the comment** BH-43
+  **the target position is the one the author wrote before the comment**
+  **no parameter is taken from the comment**
 ```
 
 The ledger is read by someone who has NOT seen the code — that is its entire

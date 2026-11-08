@@ -8,8 +8,8 @@ in language a reader who has never opened the code can judge:
 
 ```
 - **When** one of the cores stops reporting that it is running
-  - the machine faults and names a processor core as the reason `BH-585`
-  - motion stays off `BH-586`
+  - the machine faults and names a processor core as the reason
+  - motion stays off
 ```
 
 Those declarations collect into a committed ledger (`behaviours.jsonl`). Diffing
@@ -42,37 +42,28 @@ node bin/vibes.mjs publish --dir vibes-images --ref vibes-images --into "$HEAD"
 node bin/vibes.mjs post --file vibes-report.md --repo owner/repo --pr "$PR"
 ```
 
-Exit codes: `0` ok, `1` a behaviour broke or was removed, `2` usage, `3` a suite
-could not run, `4` a claim needs rewriting, `5` numbers collide or need settling.
+Exit codes: `0` ok, `2` usage, `3` a suite could not run, `4` a claim needs
+rewriting. A behaviour that **stopped holding** or was **removed** leads the
+report but does not fail it: the failing test already fails its own suite, and
+a removal is usually the point of the change. Failing on either made the job
+red on correct pull requests, and a check that is red on correct work stops
+being read. `1` and `5` are retired and not reused.
 
 A suite that declares nothing on this machine — a sanitizer that will not start,
 a missing toolchain — keeps its committed rows when you `collect --write`; the
 run says nothing new about them, so it does not delete them.
 
-## Numbers, and two branches at once
+## Two branches at once
 
-`collect --write` gives each new expectation the next number from
-`behaviours.next`. Until the branch merges, that number is **provisional**: a
-second open branch takes the same ones. Both branches change `behaviours.next`,
-so whichever merges second hits a conflict there — and that conflict is the cue.
-Do **not** keep the larger side by hand: `behaviours.jsonl` usually merges
-without a conflict, so both branches' rows would end up sharing numbers.
-Instead, after merging the base branch in:
+An expectation is identified by `suite/id/expect` and nothing else, and the
+ledger is sorted by that key. Two branches that add behaviour add different
+lines, so they merge without anything to settle.
 
-```bash
-node bin/vibes.mjs renumber --base origin/main          # settle, conflict markers and all
-node bin/vibes.mjs renumber --base origin/main --check  # CI: exit 5 if not settled
-```
-
-It runs no suites. A behaviour the base has gets the base's number back; a new
-one keeps its number unless that number is at or below the base's high-water
-mark or another new row holds it, in which case it moves past both. It prints
-every move, so a `BH-` citation you already wrote can follow. `lint` and
-`collect --write` refuse a ledger where two behaviours share a number.
-
-There is no merge driver on purpose: GitHub's merge button never runs one, and
-a driver that resolved `behaviours.next` would remove the one conflict that says
-a branch needs settling. Put `renumber --check` in a blocking CI job instead.
+Earlier versions also gave each row a `BH-n` citation number from a
+`behaviours.next` counter. Every concurrent branch then took the same numbers
+and had to renumber before it merged, which cost more than the citations were
+worth. A ledger that still carries `num` is read as if it did not, and the next
+`collect --write` drops it; delete `behaviours.next` in the same commit.
 
 ## While you are writing one
 

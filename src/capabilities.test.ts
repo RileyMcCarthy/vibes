@@ -9,7 +9,7 @@ import { areaOf, capabilityFor, groupByCapability, parseCapabilities } from './c
 import type { Behaviour } from './ledger.js';
 
 const row = (id: string, suite = 'firmware'): Behaviour => ({
-  v: 2, num: 1, id, expect: 'holds', suite, lang: 'c', file: 'test/x.c', test: 't',
+  v: 2, id, expect: 'holds', suite, lang: 'c', file: 'test/x.c', test: 't',
   given: 'a scene', then: 'an outcome', status: 'pass',
 });
 

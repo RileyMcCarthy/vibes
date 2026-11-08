@@ -240,7 +240,6 @@ export interface LedgerFinding extends Finding {
   /** `suite/id/expect`, the identity a reader can grep for. */
   readonly key: string;
   readonly file: string;
-  readonly num: number;
 }
 
 /**
@@ -269,7 +268,6 @@ export function lintLedger(items: readonly Behaviour[], opts: LintOptions = {}):
           message: `no capability declares \`${area}\` — add a heading for it to ${CAPABILITIES_FILE} saying what it is for`,
           key: `${b.suite}/${b.id}/${b.expect}`,
           file: b.file,
-          num: b.num,
         });
       }
     }
@@ -282,7 +280,7 @@ export function lintLedger(items: readonly Behaviour[], opts: LintOptions = {}):
     };
     for (const f of lintClaim(claim, opts)) {
       if (f.field === 'given' && !first) continue;
-      out.push({ ...f, key: `${b.suite}/${b.id}/${b.expect}`, file: b.file, num: b.num });
+      out.push({ ...f, key: `${b.suite}/${b.id}/${b.expect}`, file: b.file });
     }
   }
   return out;

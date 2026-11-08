@@ -130,7 +130,7 @@ describe('an expectation id is identity', () => {
 
 describe('linting a ledger', () => {
   const row = (over: Partial<Behaviour>): Behaviour => ({
-    v: 2, num: 1, id: 'ads122.start', expect: 'holds', suite: 'firmware', lang: 'c',
+    v: 2, id: 'ads122.start', expect: 'holds', suite: 'firmware', lang: 'c',
     file: 'test/x.c', test: 'test_x', given: 'when a start', then: 'the start completes',
     status: 'pass', ...over,
   });
@@ -146,14 +146,13 @@ describe('linting a ledger', () => {
   it('carries the identity a reader can grep for', () => {
     const [first] = lintLedger([row({})]);
     expect(first?.key).toBe('firmware/ads122.start/holds');
-    expect(first?.num).toBe(1);
   });
 });
 
 describe('the capability above the claim', () => {
   const caps = parseCapabilities('## Monitoring `firmware/monitor`\n\nWhat it is for.\n');
   const row = (id: string): Behaviour => ({
-    v: 2, num: 1, id, expect: 'holds', suite: 'firmware', lang: 'c', file: 'test/x.c', test: 't',
+    v: 2, id, expect: 'holds', suite: 'firmware', lang: 'c', file: 'test/x.c', test: 't',
     given: 'a scene', then: 'an outcome', status: 'pass',
   });
 

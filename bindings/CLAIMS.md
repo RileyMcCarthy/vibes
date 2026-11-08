@@ -61,7 +61,7 @@ Each field does one job. The report prints them together:
 
 ```
 - **When** one of the cores stops reporting that it is running
-  - the machine reports a core fault `BH-352`
+  - the machine reports a core fault
   <sub>`src/APP/app_control.c#app_control_run`</sub>
 ```
 

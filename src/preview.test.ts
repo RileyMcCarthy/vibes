@@ -11,7 +11,7 @@ import { diffLedgers } from './diff.js';
 import type { Behaviour } from './ledger.js';
 
 const row = (over: Partial<Behaviour> = {}): Behaviour => ({
-  v: 2, num: 42, id: 'ads122.start-drains-stale-bytes', expect: 'start-succeeds',
+  v: 2, id: 'ads122.start-drains-stale-bytes', expect: 'start-succeeds',
   suite: 'firmware', lang: 'c', file: 'test/test_ads.c', test: 'test_start',
   given: 'a start of the load-cell ADC with a leftover byte on the link',
   then: 'the start completes and the converter is converting',
@@ -71,13 +71,13 @@ describe('previewing what is already committed', () => {
   it('groups a test\'s expectations under one scene', () => {
     const text = previewLedger([row(), row({ expect: 'config-verified', then: 'the configuration is verified' })]);
     expect(text.match(/\*\*When\*\*/g)).toHaveLength(1);
-    expect(text).toContain('`BH-42`');
+    expect(text).toContain('the configuration is verified');
   });
 
   it('narrows by id, suite and file', () => {
-    const items = [row(), row({ num: 43, id: 'gcode.dwell', suite: 'control', file: 'src/domain/gcode.test.ts' })];
+    const items = [row(), row({ id: 'gcode.dwell', suite: 'control', file: 'src/domain/gcode.test.ts' })];
     expect(previewLedger(items, { id: 'ads122' })).toContain('load-cell');
-    expect(previewLedger(items, { suite: 'control' })).not.toContain('`BH-42`');
+    expect(previewLedger(items, { suite: 'control' })).not.toContain('test/test_ads.c');
     expect(previewLedger(items, { file: 'src/domain' }).match(/\*\*When\*\*/g)).toHaveLength(1);
   });
 });
