@@ -14,7 +14,7 @@ import { groupByCapability, type CapabilityMap } from './capabilities.js';
 export function headline(d: LedgerDiff): string {
   if (d.unreported.length > 0) {
     const n = d.unreported.length;
-    return `${n} behaviour${n === 1 ? '' : 's'} without a verdict — a suite failed to report.`;
+    return `${n} behaviour${n === 1 ? '' : 's'} without a verdict — a suite or test did not report.`;
   }
   if (d.broken.length > 0) {
     const n = d.broken.length;
@@ -176,6 +176,10 @@ export interface RenderOptions {
    *  has them. Named once, under the headline, so a short report about a
    *  change that ran one suite is not read as a verdict on the others. */
   readonly notRun?: readonly string[];
+  /** Suites whose run stopped early. Named once, under the headline, so a
+   *  short list of no-verdict rows is read as "not reached", not as the whole
+   *  of what went wrong. */
+  readonly incomplete?: readonly string[];
 }
 
 /* Where a reader starts when there is a map: which capabilities this change
@@ -226,6 +230,11 @@ export function renderMarkdown(d: LedgerDiff, opts: RenderOptions = {}): string 
     const names = notRun.map((s) => `\`${s}\``).join(', ');
     out.push(`_Not run for this change: ${names} — ${notRun.length === 1 ? 'its' : 'their'} behaviours are carried from the base as they were._`, '');
   }
+  const incomplete = opts.incomplete ?? [];
+  if (incomplete.length > 0) {
+    const names = incomplete.map((s) => `\`${s}\``).join(', ');
+    out.push(`_Did not finish: ${names} — every test that reported has its verdict below; any behaviour it did not reach has none._`, '');
+  }
   out.push(...summary(d));
   const caps = opts.capabilities;
   if (caps !== undefined) out.push(...byCapabilityTable(caps, d));
@@ -265,9 +274,9 @@ export function renderMarkdown(d: LedgerDiff, opts: RenderOptions = {}): string 
   }
 
   if (d.unreported.length > 0) {
-    out.push('## No verdict — the suite did not report', '');
+    out.push('## No verdict — not reported', '');
     out.push(
-      'These were in the ledger, and this run learned NOTHING about them: their whole suite declared no behaviours, usually a build or startup failure. This is not removal and it is not a pass.',
+      'These are in the ledger, and this run learned NOTHING about them: their suite declared nothing (usually a build or startup failure), its run stopped before reaching them, or their test started and never reported a result. This is not removal and it is not a pass.',
       '',
     );
     section(d.unreported, (b) => b, (items) =>

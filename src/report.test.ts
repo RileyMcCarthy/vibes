@@ -178,6 +178,15 @@ describe('a respecification is a changed claim', () => {
   });
 });
 
+describe('a behaviour whose test reported nothing', () => {
+  it('has no verdict, and is not listed as stopped holding', () => {
+    const d = diffLedgers([row({ id: 'x.y', then: 'a claim' })], [row({ id: 'x.y', then: 'a claim', status: 'did-not-report' })]);
+    expect(d.broken).toEqual([]);
+    expect(d.unreported.map((b) => b.id)).toEqual(['x.y']);
+    expect(renderMarkdown(d)).toContain('## No verdict');
+  });
+});
+
 describe('where a second section sits', () => {
   it('leads with it when the ledger has nothing to read', () => {
     expect(isQuiet(diffLedgers([], []))).toBe(true);
